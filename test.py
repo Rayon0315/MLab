@@ -4,20 +4,30 @@ import argparse
 import importlib
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from data.dataset import SODDataset
+from metrics.sod_metrics import (
+    evaluate_prediction_directory,
+    get_metric_library_version,
+    save_metric_curves,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Test an RGB SOD network."
+        description=(
+            "Run RGB SOD inference and standard "
+            "original-size evaluation."
+        )
     )
 
     parser.add_argument(
@@ -26,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--checkpoint",
-        required=True,
+        default=None,
     )
 
     parser.add_argument(
@@ -37,14 +47,34 @@ def parse_args() -> argparse.Namespace:
         "--test-masks",
         default="datasets/DUTS/DUTS-TE/DUTS-TE-Mask",
     )
+    parser.add_argument(
+        "--dataset-name",
+        default="DUTS-TE",
+    )
 
-    parser.add_argument("--image-size", type=int, default=352)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=352,
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+    )
 
     parser.add_argument(
         "--device",
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        default=(
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        ),
     )
     parser.add_argument(
         "--amp",
@@ -56,19 +86,47 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         default="outputs/resnet18_baseline/DUTS-TE",
     )
-    parser.add_argument("--log-interval", type=int, default=50)
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=100,
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=10,
+    )
 
     parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
-        help="Limit test samples for debugging.",
+        help="Use only the first N test samples.",
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--evaluate-only",
+        action="store_true",
+        help=(
+            "Skip model inference and evaluate the "
+            "existing predictions directory."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if not args.evaluate_only and args.checkpoint is None:
+        parser.error(
+            "--checkpoint is required unless "
+            "--evaluate-only is used."
+        )
+
+    return args
 
 
-def setup_logging(log_path: Path) -> None:
+def setup_logging(
+    log_path: Path,
+) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(message)s",
@@ -84,14 +142,19 @@ def setup_logging(log_path: Path) -> None:
     )
 
 
-def build_model(network_path: str) -> torch.nn.Module:
-    network_module = importlib.import_module(network_path)
+def build_model(
+    network_path: str,
+) -> nn.Module:
+    network_module = importlib.import_module(
+        network_path
+    )
+
     return network_module.build_model()
 
 
 def load_checkpoint(
     checkpoint_path: str,
-    model: torch.nn.Module,
+    model: nn.Module,
     network_path: str,
 ) -> dict:
     checkpoint = torch.load(
@@ -115,51 +178,87 @@ def load_checkpoint(
     return checkpoint
 
 
+def synchronize(
+    device: torch.device,
+) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 @torch.inference_mode()
-def test(
-    model: torch.nn.Module,
+def warm_up(
+    model: nn.Module,
+    data_loader: DataLoader,
+    device: torch.device,
+    use_amp: bool,
+    warmup_steps: int,
+) -> None:
+    if warmup_steps <= 0:
+        return
+
+    batch = next(iter(data_loader))
+
+    image = batch["image"].to(
+        device,
+        non_blocking=True,
+    )
+
+    for _ in range(warmup_steps):
+        with torch.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=use_amp,
+        ):
+            model(image)
+
+    synchronize(device)
+
+
+@torch.inference_mode()
+def run_inference(
+    model: nn.Module,
     data_loader: DataLoader,
     device: torch.device,
     use_amp: bool,
     prediction_dir: Path,
     log_interval: int,
-) -> dict[str, float]:
+) -> dict[str, float | int]:
     logger = logging.getLogger(__name__)
 
     model.eval()
 
-    mae_sum = 0.0
     sample_count = 0
-    start_time = time.perf_counter()
+    forward_seconds = 0.0
+    prediction_save_seconds = 0.0
 
-    for batch_index, batch in enumerate(data_loader, start=1):
+    inference_start = time.perf_counter()
+
+    for batch_index, batch in enumerate(
+        data_loader,
+        start=1,
+    ):
         image = batch["image"].to(
             device,
             non_blocking=True,
         )
-        mask = batch["mask"].to(
-            device,
-            non_blocking=True,
-        )
+
+        synchronize(device)
+        forward_start = time.perf_counter()
 
         with torch.autocast(
             device_type=device.type,
             dtype=torch.float16,
             enabled=use_amp,
         ):
-            logits = model(image)["pred"]
+            outputs = model(image)
+            logits = outputs["pred"]
 
-        prediction = torch.sigmoid(logits)
-
-        batch_mae = (
-            prediction.sub(mask)
-            .abs()
-            .flatten(start_dim=1)
-            .mean(dim=1)
+        synchronize(device)
+        forward_seconds += (
+            time.perf_counter() - forward_start
         )
 
-        mae_sum += batch_mae.sum().item()
-        sample_count += image.shape[0]
+        save_start = time.perf_counter()
 
         for index, name in enumerate(batch["name"]):
             original_height = int(
@@ -169,15 +268,24 @@ def test(
                 batch["original_size"][index, 1]
             )
 
-            restored_prediction = F.interpolate(
-                prediction[index:index + 1],
-                size=(original_height, original_width),
+            # 先将 logits 恢复到原始尺寸，
+            # 再执行 sigmoid。
+            restored_logits = F.interpolate(
+                logits[index:index + 1].float(),
+                size=(
+                    original_height,
+                    original_width,
+                ),
                 mode="bilinear",
                 align_corners=False,
             )
 
+            prediction = torch.sigmoid(
+                restored_logits
+            )
+
             prediction_array = (
-                restored_prediction[0, 0]
+                prediction[0, 0]
                 .clamp(0.0, 1.0)
                 .mul(255.0)
                 .round()
@@ -187,106 +295,292 @@ def test(
             )
 
             Image.fromarray(
-                prediction_array,
-                mode="L",
+                prediction_array
             ).save(
                 prediction_dir / f"{name}.png"
             )
+
+        prediction_save_seconds += (
+            time.perf_counter() - save_start
+        )
+
+        sample_count += image.shape[0]
 
         if (
             batch_index % log_interval == 0
             or batch_index == len(data_loader)
         ):
             logger.info(
-                "Batch %05d/%05d | Saved %d predictions",
+                "Inference %05d/%05d | "
+                "Saved %d predictions",
                 batch_index,
                 len(data_loader),
                 sample_count,
             )
 
-    elapsed_time = time.perf_counter() - start_time
+    end_to_end_seconds = (
+        time.perf_counter() - inference_start
+    )
 
     return {
-        "mae": mae_sum / sample_count,
         "samples": sample_count,
-        "time_seconds": elapsed_time,
-        "milliseconds_per_image": elapsed_time * 1000 / sample_count,
+        "forward_seconds": forward_seconds,
+        "forward_ms_per_image": (
+            forward_seconds * 1000 / sample_count
+        ),
+        "prediction_save_seconds": (
+            prediction_save_seconds
+        ),
+        "end_to_end_seconds": (
+            end_to_end_seconds
+        ),
+        "end_to_end_ms_per_image": (
+            end_to_end_seconds
+            * 1000
+            / sample_count
+        ),
     }
+
+
+def get_device_name(
+    device: torch.device,
+) -> str:
+    if device.type == "cuda":
+        return torch.cuda.get_device_name(device)
+
+    return "CPU"
 
 
 def main() -> None:
     args = parse_args()
 
     device = torch.device(args.device)
-    use_amp = args.amp and device.type == "cuda"
+    use_amp = (
+        args.amp
+        and device.type == "cuda"
+    )
 
     output_dir = Path(args.output_dir)
     prediction_dir = output_dir / "predictions"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    prediction_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    setup_logging(output_dir / "test.log")
+    setup_logging(
+        output_dir / "test.log"
+    )
+
     logger = logging.getLogger(__name__)
 
-    logger.info("Network: %s", args.network)
-    logger.info("Checkpoint: %s", args.checkpoint)
-    logger.info("Device: %s", device)
-    logger.info("AMP: %s", use_amp)
-
-    dataset = SODDataset(
-        image_dir=args.test_images,
-        mask_dir=args.test_masks,
-        image_size=(args.image_size, args.image_size),
-    )
-
-    if args.max_samples is not None:
-        dataset = Subset(
-            dataset,
-            range(min(args.max_samples, len(dataset))),
+    with (output_dir / "test_args.json").open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            vars(args),
+            file,
+            indent=2,
+            ensure_ascii=False,
         )
 
-    data_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
-    )
-
-    model = build_model(args.network)
-    checkpoint = load_checkpoint(
-        checkpoint_path=args.checkpoint,
-        model=model,
-        network_path=args.network,
-    )
-    model = model.to(device)
-
     logger.info(
-        "Loaded checkpoint | Epoch: %d | Best MAE: %s",
-        checkpoint["epoch"],
-        checkpoint.get("best_metric"),
+        "Dataset: %s",
+        args.dataset_name,
     )
-    logger.info("Test samples: %d", len(dataset))
+    logger.info(
+        "Device: %s",
+        device,
+    )
+    logger.info(
+        "Device name: %s",
+        get_device_name(device),
+    )
+    logger.info(
+        "AMP: %s",
+        use_amp,
+    )
 
-    statistics = test(
-        model=model,
-        data_loader=data_loader,
-        device=device,
-        use_amp=use_amp,
+    checkpoint_epoch = None
+    checkpoint_best_metric = None
+    inference_statistics = None
+
+    if not args.evaluate_only:
+        logger.info(
+            "Network: %s",
+            args.network,
+        )
+        logger.info(
+            "Checkpoint: %s",
+            args.checkpoint,
+        )
+
+        if prediction_dir.exists():
+            shutil.rmtree(prediction_dir)
+
+        prediction_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        dataset = SODDataset(
+            image_dir=args.test_images,
+            mask_dir=args.test_masks,
+            image_size=(
+                args.image_size,
+                args.image_size,
+            ),
+        )
+
+        if args.max_samples is not None:
+            dataset = Subset(
+                dataset,
+                range(
+                    min(
+                        args.max_samples,
+                        len(dataset),
+                    )
+                ),
+            )
+
+        data_loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+            persistent_workers=(
+                args.num_workers > 0
+            ),
+        )
+
+        model = build_model(args.network)
+
+        checkpoint = load_checkpoint(
+            checkpoint_path=args.checkpoint,
+            model=model,
+            network_path=args.network,
+        )
+
+        checkpoint_epoch = checkpoint["epoch"]
+        checkpoint_best_metric = (
+            checkpoint.get("best_metric")
+        )
+
+        model = model.to(device)
+        model.eval()
+
+        logger.info(
+            "Loaded checkpoint | "
+            "Epoch %d | Best metric %s",
+            checkpoint_epoch,
+            checkpoint_best_metric,
+        )
+        logger.info(
+            "Test samples: %d",
+            len(dataset),
+        )
+
+        warm_up(
+            model=model,
+            data_loader=data_loader,
+            device=device,
+            use_amp=use_amp,
+            warmup_steps=args.warmup_steps,
+        )
+
+        inference_statistics = run_inference(
+            model=model,
+            data_loader=data_loader,
+            device=device,
+            use_amp=use_amp,
+            prediction_dir=prediction_dir,
+            log_interval=args.log_interval,
+        )
+
+        logger.info(
+            "Inference completed | "
+            "Forward %.3f ms/image | "
+            "End-to-end %.3f ms/image",
+            inference_statistics[
+                "forward_ms_per_image"
+            ],
+            inference_statistics[
+                "end_to_end_ms_per_image"
+            ],
+        )
+
+    else:
+        logger.info(
+            "Evaluation-only mode"
+        )
+        logger.info(
+            "Predictions: %s",
+            prediction_dir,
+        )
+
+    evaluation_start = time.perf_counter()
+
+    (
+        metric_results,
+        metric_curves,
+        evaluated_samples,
+    ) = evaluate_prediction_directory(
         prediction_dir=prediction_dir,
-        log_interval=args.log_interval,
+        ground_truth_dir=args.test_masks,
+    )
+
+    evaluation_seconds = (
+        time.perf_counter() - evaluation_start
+    )
+
+    save_metric_curves(
+        path=output_dir / "curves.npz",
+        curves=metric_curves,
+    )
+
+    metric_library_version = (
+        get_metric_library_version()
     )
 
     results = {
+        "dataset": args.dataset_name,
         "network": args.network,
         "checkpoint": args.checkpoint,
-        "checkpoint_epoch": checkpoint["epoch"],
-        "checkpoint_best_metric": checkpoint.get("best_metric"),
-        "test_dataset": "DUTS-TE",
-        "metric_space": "resized_input",
-        **statistics,
+        "checkpoint_epoch": checkpoint_epoch,
+        "checkpoint_best_metric": (
+            checkpoint_best_metric
+        ),
+        "samples": evaluated_samples,
+        "metrics": metric_results,
+        "inference": {
+            "input_size": args.image_size,
+            "batch_size": args.batch_size,
+            "amp": use_amp,
+            "device": str(device),
+            "device_name": get_device_name(
+                device
+            ),
+            "warmup_steps": args.warmup_steps,
+            **inference_statistics,
+        } if inference_statistics else None,
+        "evaluation": {
+            "seconds": evaluation_seconds,
+            "prediction_space": (
+                "original_size_uint8"
+            ),
+            "metric_library": (
+                "pysodmetrics"
+            ),
+            "metric_library_version": (
+                metric_library_version
+            ),
+            "fmeasure_beta": 0.3,
+            "per_image_min_max_normalization": (
+                False
+            ),
+        },
     }
 
     with (output_dir / "metrics.json").open(
@@ -301,16 +595,54 @@ def main() -> None:
         )
 
     logger.info(
-        "Test completed | Samples %d | MAE %.6f | "
-        "Time %.1fs | %.2f ms/image",
-        statistics["samples"],
-        statistics["mae"],
-        statistics["time_seconds"],
-        statistics["milliseconds_per_image"],
+        "Evaluation completed | "
+        "Samples %d | Time %.1fs",
+        evaluated_samples,
+        evaluation_seconds,
+    )
+
+    logger.info(
+        "MAE %.6f | "
+        "S-measure %.6f | "
+        "Weighted F-measure %.6f",
+        metric_results["mae"],
+        metric_results["smeasure"],
+        metric_results[
+            "weighted_fmeasure"
+        ],
+    )
+
+    logger.info(
+        "F-measure | "
+        "Max %.6f | Mean %.6f | Adaptive %.6f",
+        metric_results["max_fmeasure"],
+        metric_results["mean_fmeasure"],
+        metric_results[
+            "adaptive_fmeasure"
+        ],
+    )
+
+    logger.info(
+        "E-measure | "
+        "Max %.6f | Mean %.6f | Adaptive %.6f",
+        metric_results["max_emeasure"],
+        metric_results["mean_emeasure"],
+        metric_results[
+            "adaptive_emeasure"
+        ],
+    )
+
+    logger.info(
+        "Predictions: %s",
+        prediction_dir,
     )
     logger.info(
-        "Predictions saved to: %s",
-        prediction_dir,
+        "Metrics: %s",
+        output_dir / "metrics.json",
+    )
+    logger.info(
+        "Curves: %s",
+        output_dir / "curves.npz",
     )
 
 

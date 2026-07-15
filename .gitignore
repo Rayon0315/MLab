@@ -1,0 +1,235 @@
+# .gitignore
+
+# =========================================================
+
+# Python
+
+# =========================================================
+
+**pycache**/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Python test / analysis caches
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Build / packaging
+
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# =========================================================
+
+# Virtual environments
+
+# =========================================================
+
+.venv/
+venv/
+env/
+ENV/
+conda-env/
+.python-version
+
+# =========================================================
+
+# IDE / editors
+
+# =========================================================
+
+.vscode/
+.idea/
+*.code-workspace
+
+# Vim
+
+*.swp
+*.swo
+*.swn
+*~
+
+# =========================================================
+
+# Environment variables and local configuration
+
+# =========================================================
+
+.env
+.env.*
+!.env.example
+
+# Local-only configuration
+
+*.local
+local_config.py
+
+# =========================================================
+
+# PyTorch / model files
+
+# =========================================================
+
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.torchscript
+
+# =========================================================
+
+# Training outputs
+
+# =========================================================
+
+checkpoints/
+weights/
+runs/
+outputs/
+output/
+results/
+experiments/
+work_dirs/
+logs/
+log/
+
+# TensorBoard
+
+tensorboard/
+events.out.tfevents.*
+
+# Experiment trackers
+
+wandb/
+.wandb/
+mlruns/
+.mlflow/
+
+# =========================================================
+
+# Datasets
+
+# =========================================================
+
+dataset/
+datasets/
+
+# Common SOD dataset directories
+
+DUTS/
+DUT-OMRON/
+ECSSD/
+HKU-IS/
+PASCAL-S/
+SOD/
+THUR15K/
+
+# =========================================================
+
+# Predictions and generated files
+
+# =========================================================
+
+predictions/
+predicts/
+visualizations/
+visualization/
+generated/
+samples/
+
+# Temporary files
+
+tmp/
+temp/
+.cache/
+*.tmp
+*.temp
+
+# =========================================================
+
+# Notebook
+
+# =========================================================
+
+.ipynb_checkpoints/
+
+# =========================================================
+
+# Operating systems
+
+# =========================================================
+
+# Windows
+
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+
+.directory
+.Trash-*
+.nfs*
+
+# =========================================================
+
+# Archives
+
+# =========================================================
+
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# =========================================================
+
+# Project-specific local files
+
+# =========================================================
+
+scratch/
+debug/
+profiling/
+profile/
+*.prof
+
+# Keep empty directories when needed
+
+!.gitkeep
+
+# Ignore hidden files and directories
+.*
+
+# Keep important repository files
+!.gitignore
+!.gitattributes
+!.editorconfig
+!.github/
+!.github/**
+!.env.example

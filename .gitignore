@@ -99,6 +99,7 @@ local_config.py
 
 checkpoints/
 weights/
+pretrained/
 runs/
 outputs/
 output/

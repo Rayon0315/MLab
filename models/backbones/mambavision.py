@@ -1235,5 +1235,49 @@ def mamba_vision_tiny(
 
     return model
 
+def mamba_vision_small(
+    pretrained_path: str | Path | None = None,
+    **kwargs: Any,
+) -> MambaVisionBackbone:
+    model = MambaVisionBackbone(
+        depths=kwargs.pop(
+            "depths",
+            [3, 3, 7, 5],
+        ),
+        num_heads=kwargs.pop(
+            "num_heads",
+            [2, 4, 8, 16],
+        ),
+        window_size=kwargs.pop(
+            "window_size",
+            [8, 8, 14, 7],
+        ),
+        dim=kwargs.pop(
+            "dim",
+            96,
+        ),
+        in_dim=kwargs.pop(
+            "in_dim",
+            64,
+        ),
+        mlp_ratio=kwargs.pop(
+            "mlp_ratio",
+            4.0,
+        ),
+        drop_path_rate=kwargs.pop(
+            "drop_path_rate",
+            0.2,
+        ),
+        **kwargs,
+    )
+
+    if pretrained_path is not None:
+        model.load_pretrained(
+            checkpoint_path=pretrained_path,
+        )
+
+    return model
+
 
 mamba_vision_T = mamba_vision_tiny
+mamba_vision_S = mamba_vision_small

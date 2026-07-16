@@ -15,6 +15,7 @@ from py_sod_metrics import (
     Smeasure,
     WeightedFmeasure,
 )
+from tqdm import tqdm
 
 
 IMAGE_SUFFIXES = {
@@ -146,10 +147,10 @@ class SODMetricRecorder:
 
         return metrics, curves
 
-
 def evaluate_prediction_directory(
     prediction_dir: str | Path,
     ground_truth_dir: str | Path,
+    show_progress: bool = True,
 ) -> tuple[
     dict[str, float],
     dict[str, np.ndarray],
@@ -157,7 +158,6 @@ def evaluate_prediction_directory(
 ]:
     """
     Evaluate saved prediction images against original ground truth masks.
-
     Predictions are paired with ground truths by file stem.
     """
     prediction_dir = Path(prediction_dir)
@@ -169,16 +169,24 @@ def evaluate_prediction_directory(
     missing_ground_truths = sorted(
         set(prediction_map) - set(ground_truth_map)
     )
-
     if missing_ground_truths:
         raise RuntimeError(
             "Predictions without matching ground truths: "
             + ", ".join(missing_ground_truths[:10])
         )
 
+    prediction_names = sorted(prediction_map)
     recorder = SODMetricRecorder()
 
-    for name in sorted(prediction_map):
+    progress_bar = tqdm(
+        prediction_names,
+        desc="Evaluation",
+        unit="image",
+        dynamic_ncols=True,
+        disable=not show_progress,
+    )
+
+    for name in progress_bar:
         prediction = _read_grayscale(
             prediction_map[name]
         )
@@ -199,7 +207,7 @@ def evaluate_prediction_directory(
 
     metrics, curves = recorder.get_results()
 
-    return metrics, curves, len(prediction_map)
+    return metrics, curves, len(prediction_names)
 
 
 def save_metric_curves(

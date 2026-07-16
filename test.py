@@ -20,6 +20,7 @@ from metrics.sod_metrics import (
     get_metric_library_version,
     save_metric_curves,
 )
+from tqdm import tqdm
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,7 +90,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-interval",
         type=int,
-        default=100,
+        default=1,
+        help="Progress bar refresh interval in batches.",
     )
     parser.add_argument(
         "--warmup-steps",
@@ -214,6 +216,8 @@ def warm_up(
     synchronize(device)
 
 
+# test.py
+
 @torch.inference_mode()
 def run_inference(
     model: nn.Module,
@@ -223,20 +227,22 @@ def run_inference(
     prediction_dir: Path,
     log_interval: int,
 ) -> dict[str, float | int]:
-    logger = logging.getLogger(__name__)
-
     model.eval()
 
     sample_count = 0
     forward_seconds = 0.0
     prediction_save_seconds = 0.0
-
     inference_start = time.perf_counter()
 
-    for batch_index, batch in enumerate(
+    progress_bar = tqdm(
         data_loader,
-        start=1,
-    ):
+        desc="Inference",
+        unit="batch",
+        dynamic_ncols=True,
+        miniters=log_interval,
+    )
+
+    for batch in progress_bar:
         image = batch["image"].to(
             device,
             non_blocking=True,
@@ -254,6 +260,7 @@ def run_inference(
             logits = outputs["pred"]
 
         synchronize(device)
+
         forward_seconds += (
             time.perf_counter() - forward_start
         )
@@ -268,8 +275,6 @@ def run_inference(
                 batch["original_size"][index, 1]
             )
 
-            # 先将 logits 恢复到原始尺寸，
-            # 再执行 sigmoid。
             restored_logits = F.interpolate(
                 logits[index:index + 1].float(),
                 size=(
@@ -306,17 +311,9 @@ def run_inference(
 
         sample_count += image.shape[0]
 
-        if (
-            batch_index % log_interval == 0
-            or batch_index == len(data_loader)
-        ):
-            logger.info(
-                "Inference %05d/%05d | "
-                "Saved %d predictions",
-                batch_index,
-                len(data_loader),
-                sample_count,
-            )
+        progress_bar.set_postfix(
+            saved=sample_count,
+        )
 
     end_to_end_seconds = (
         time.perf_counter() - inference_start

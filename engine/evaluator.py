@@ -5,6 +5,7 @@ import time
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 
 @torch.inference_mode()
@@ -20,9 +21,23 @@ def evaluate(
     sample_count = 0
     start_time = time.perf_counter()
 
-    for batch in data_loader:
-        image = batch["image"].to(device, non_blocking=True)
-        mask = batch["mask"].to(device, non_blocking=True)
+    progress_bar = tqdm(
+        data_loader,
+        desc="Validation",
+        unit="batch",
+        dynamic_ncols=True,
+        leave=False,
+    )
+
+    for batch in progress_bar:
+        image = batch["image"].to(
+            device,
+            non_blocking=True,
+        )
+        mask = batch["mask"].to(
+            device,
+            non_blocking=True,
+        )
 
         with torch.autocast(
             device_type=device.type,
@@ -42,6 +57,10 @@ def evaluate(
 
         mae_sum += batch_mae.sum().item()
         sample_count += image.shape[0]
+
+        progress_bar.set_postfix(
+            mae=f"{mae_sum / sample_count:.6f}",
+        )
 
     return {
         "mae": mae_sum / sample_count,

@@ -9,7 +9,6 @@ python train.py \
     --lr 1e-4 \
     --weight-decay 1e-4 \
     --aux-weight 0.4 \
-    --val-count 500 \
     --seed 42 \
     --save-every 5 \
     --log-interval 100

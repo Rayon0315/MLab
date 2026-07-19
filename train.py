@@ -15,7 +15,6 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Subset
 
 from data.dataset import SODDataset
-from engine.evaluator import evaluate
 from engine.trainer import train_one_epoch
 from losses.sod_loss import SODLoss
 
@@ -64,27 +63,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--log-interval", type=int, default=50)
-    parser.add_argument("--resume", default=None)
 
+    parser.add_argument("--resume", default=None)
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument(
-        "--val-count",
-        type=int,
-        default=500,
-        help="Number of DUTS-TR samples reserved for validation.",
-    )
     parser.add_argument(
         "--max-train-samples",
         type=int,
         default=None,
-        help="Limit training samples for debugging.",
-    )
-    parser.add_argument(
-        "--max-val-samples",
-        type=int,
-        default=None,
-        help="Limit validation samples for debugging.",
+        help="Use only the first N training samples for debugging.",
     )
 
     return parser.parse_args()
@@ -125,39 +112,6 @@ def build_model(
     return model, network_module
 
 
-def split_dataset(
-    dataset: SODDataset,
-    val_count: int,
-    seed: int,
-    max_train_samples: int | None,
-    max_val_samples: int | None,
-) -> tuple[Subset, Subset, list[int], list[int]]:
-    generator = torch.Generator().manual_seed(seed)
-    indices = torch.randperm(
-        len(dataset),
-        generator=generator,
-    ).tolist()
-
-    val_indices = indices[:val_count]
-    train_indices = indices[val_count:]
-
-    if max_train_samples is not None:
-        train_indices = train_indices[:max_train_samples]
-
-    if max_val_samples is not None:
-        val_indices = val_indices[:max_val_samples]
-
-    train_dataset = Subset(dataset, train_indices)
-    val_dataset = Subset(dataset, val_indices)
-
-    return (
-        train_dataset,
-        val_dataset,
-        train_indices,
-        val_indices,
-    )
-
-
 def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
@@ -166,7 +120,6 @@ def save_checkpoint(
     args: argparse.Namespace,
     epoch: int,
     global_step: int,
-    best_metric: float,
 ) -> None:
     torch.save(
         {
@@ -174,7 +127,6 @@ def save_checkpoint(
             "network": args.network,
             "epoch": epoch,
             "global_step": global_step,
-            "best_metric": best_metric,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": None,
@@ -191,7 +143,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     network_path: str,
-) -> tuple[int, int, float]:
+) -> tuple[int, int]:
     checkpoint = torch.load(
         path,
         map_location="cpu",
@@ -202,7 +154,7 @@ def load_checkpoint(
         raise RuntimeError(
             "Checkpoint network does not match:\n"
             f'checkpoint: {checkpoint["network"]}\n'
-            f"command:    {network_path}"
+            f"command: {network_path}"
         )
 
     model.load_state_dict(
@@ -214,15 +166,9 @@ def load_checkpoint(
     if checkpoint.get("scaler") is not None:
         scaler.load_state_dict(checkpoint["scaler"])
 
-    best_metric = checkpoint.get("best_metric")
-
-    if best_metric is None:
-        best_metric = float("inf")
-
     return (
         checkpoint["epoch"] + 1,
         checkpoint["global_step"],
-        best_metric,
     )
 
 
@@ -242,10 +188,8 @@ def prepare_metrics_file(
                 "train_loss",
                 "train_loss_main",
                 "train_loss_aux",
-                "val_mae",
                 "learning_rate",
                 "train_time_seconds",
-                "val_time_seconds",
             ]
         )
 
@@ -255,7 +199,6 @@ def append_metrics(
     epoch: int,
     global_step: int,
     train_statistics: dict[str, float],
-    val_statistics: dict[str, float],
 ) -> None:
     with path.open("a", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
@@ -266,10 +209,8 @@ def append_metrics(
                 train_statistics["loss"],
                 train_statistics.get("loss_main", ""),
                 train_statistics.get("loss_aux", ""),
-                val_statistics["mae"],
                 train_statistics["lr"],
                 train_statistics["time_seconds"],
-                val_statistics["time_seconds"],
             ]
         )
 
@@ -294,7 +235,6 @@ def main() -> None:
         log_path=log_dir / "train.log",
         resume=args.resume is not None,
     )
-
     logger = logging.getLogger(__name__)
 
     logger.info("Run directory: %s", run_dir)
@@ -323,50 +263,27 @@ def main() -> None:
 
     model = model.to(device)
 
-    full_dataset = SODDataset(
+    train_dataset = SODDataset(
         image_dir=args.train_images,
         mask_dir=args.train_masks,
         image_size=(args.image_size, args.image_size),
     )
 
-    (
-        train_dataset,
-        val_dataset,
-        train_indices,
-        val_indices,
-    ) = split_dataset(
-        dataset=full_dataset,
-        val_count=args.val_count,
-        seed=args.seed,
-        max_train_samples=args.max_train_samples,
-        max_val_samples=args.max_val_samples,
-    )
-
-    with (run_dir / "data_split.json").open(
-        "w",
-        encoding="utf-8",
-    ) as file:
-        json.dump(
-            {
-                "train_indices": train_indices,
-                "val_indices": val_indices,
-            },
-            file,
+    if args.max_train_samples is not None:
+        train_dataset = Subset(
+            train_dataset,
+            range(
+                min(
+                    args.max_train_samples,
+                    len(train_dataset),
+                )
+            ),
         )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
         persistent_workers=args.num_workers > 0,
@@ -389,14 +306,9 @@ def main() -> None:
 
     start_epoch = 1
     global_step = 0
-    best_metric = float("inf")
 
     if args.resume is not None:
-        (
-            start_epoch,
-            global_step,
-            best_metric,
-        ) = load_checkpoint(
+        start_epoch, global_step = load_checkpoint(
             path=args.resume,
             model=model,
             optimizer=optimizer,
@@ -405,23 +317,19 @@ def main() -> None:
         )
 
         logger.info(
-            "Resumed from %s | Next epoch: %d | "
-            "Step: %d | Best MAE: %.6f",
+            "Resumed from %s | Next epoch: %d | Step: %d",
             args.resume,
             start_epoch,
             global_step,
-            best_metric,
         )
 
     metrics_path = log_dir / "metrics.csv"
-
     prepare_metrics_file(
         path=metrics_path,
         resume=args.resume is not None,
     )
 
     logger.info("Training samples: %d", len(train_dataset))
-    logger.info("Validation samples: %d", len(val_dataset))
     logger.info("Batches per epoch: %d", len(train_loader))
     logger.info("Total epochs: %d", args.epochs)
 
@@ -439,54 +347,23 @@ def main() -> None:
             log_interval=args.log_interval,
         )
 
-        val_statistics = evaluate(
-            model=model,
-            data_loader=val_loader,
-            device=device,
-            use_amp=use_amp,
-        )
-
         append_metrics(
             path=metrics_path,
             epoch=epoch,
             global_step=global_step,
             train_statistics=train_statistics,
-            val_statistics=val_statistics,
         )
 
         logger.info(
             "Epoch %03d completed | "
             "Train loss %.6f | "
-            "Val MAE %.6f | "
             "LR %.8f | "
-            "Train %.1fs | Val %.1fs",
+            "Train %.1fs",
             epoch,
             train_statistics["loss"],
-            val_statistics["mae"],
             train_statistics["lr"],
             train_statistics["time_seconds"],
-            val_statistics["time_seconds"],
         )
-
-        if val_statistics["mae"] < best_metric:
-            best_metric = val_statistics["mae"]
-
-            save_checkpoint(
-                path=checkpoint_dir / "best.pth",
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler,
-                args=args,
-                epoch=epoch,
-                global_step=global_step,
-                best_metric=best_metric,
-            )
-
-            logger.info(
-                "New best checkpoint | Epoch %03d | MAE %.6f",
-                epoch,
-                best_metric,
-            )
 
         save_checkpoint(
             path=checkpoint_dir / "latest.pth",
@@ -496,13 +373,9 @@ def main() -> None:
             args=args,
             epoch=epoch,
             global_step=global_step,
-            best_metric=best_metric,
         )
 
-        if (
-            epoch % args.save_every == 0
-            or epoch == args.epochs
-        ):
+        if epoch % args.save_every == 0:
             save_checkpoint(
                 path=checkpoint_dir / f"epoch_{epoch:04d}.pth",
                 model=model,
@@ -511,12 +384,22 @@ def main() -> None:
                 args=args,
                 epoch=epoch,
                 global_step=global_step,
-                best_metric=best_metric,
+            )
+
+        if epoch == args.epochs:
+            save_checkpoint(
+                path=checkpoint_dir / "final.pth",
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                args=args,
+                epoch=epoch,
+                global_step=global_step,
             )
 
     logger.info(
-        "Training completed | Best validation MAE: %.6f",
-        best_metric,
+        "Training completed | Final checkpoint: %s",
+        checkpoint_dir / "final.pth",
     )
 
 

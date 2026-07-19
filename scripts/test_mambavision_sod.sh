@@ -1,7 +1,7 @@
 # scripts/test_mambavision_sod.sh
 python test.py \
     --network models.networks.mambavision_sod \
-    --checkpoint runs/mambavision_sod_duts/checkpoints/best.pth \
+    --checkpoint runs/mambavision_sod_duts/checkpoints/final.pth \
     --output-dir runs/mambavision_sod_duts/test/DUTS-TE \
     --dataset-name DUTS-TE \
     --image-size 352 \

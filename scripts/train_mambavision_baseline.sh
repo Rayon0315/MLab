@@ -9,7 +9,6 @@ python train.py \
     --epochs 30 \
     --batch-size 8 \
     --num-workers 4 \
-    --val-count 500 \
     --seed 42 \
     --lr 1e-4 \
     --weight-decay 1e-4 \

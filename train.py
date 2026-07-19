@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
 
 from data.dataset import SODDataset
@@ -44,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
 
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--min-lr", type=float, default=1e-6)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--aux-weight", type=float, default=0.4)
 
@@ -116,6 +118,7 @@ def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
     scaler: torch.amp.GradScaler,
     args: argparse.Namespace,
     epoch: int,
@@ -129,7 +132,7 @@ def save_checkpoint(
             "global_step": global_step,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "scheduler": None,
+            "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
             "args": vars(args),
         },
@@ -141,6 +144,7 @@ def load_checkpoint(
     path: str,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
     scaler: torch.amp.GradScaler,
     network_path: str,
 ) -> tuple[int, int]:
@@ -162,9 +166,8 @@ def load_checkpoint(
         strict=True,
     )
     optimizer.load_state_dict(checkpoint["optimizer"])
-
-    if checkpoint.get("scaler") is not None:
-        scaler.load_state_dict(checkpoint["scaler"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
+    scaler.load_state_dict(checkpoint["scaler"])
 
     return (
         checkpoint["epoch"] + 1,
@@ -241,6 +244,11 @@ def main() -> None:
     logger.info("Device: %s", device)
     logger.info("AMP: %s", use_amp)
     logger.info("Network: %s", args.network)
+    logger.info(
+        "LR schedule: cosine | Initial LR: %.8f | Minimum LR: %.8f",
+        args.lr,
+        args.min_lr,
+    )
 
     with (run_dir / "args.json").open(
         "w",
@@ -299,6 +307,12 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
 
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=args.min_lr,
+    )
+
     scaler = torch.amp.GradScaler(
         "cuda",
         enabled=use_amp,
@@ -312,15 +326,17 @@ def main() -> None:
             path=args.resume,
             model=model,
             optimizer=optimizer,
+            scheduler=scheduler,
             scaler=scaler,
             network_path=args.network,
         )
 
         logger.info(
-            "Resumed from %s | Next epoch: %d | Step: %d",
+            "Resumed from %s | Next epoch: %d | Step: %d | LR: %.8f",
             args.resume,
             start_epoch,
             global_step,
+            optimizer.param_groups[0]["lr"],
         )
 
     metrics_path = log_dir / "metrics.csv"
@@ -365,10 +381,13 @@ def main() -> None:
             train_statistics["time_seconds"],
         )
 
+        scheduler.step()
+
         save_checkpoint(
             path=checkpoint_dir / "latest.pth",
             model=model,
             optimizer=optimizer,
+            scheduler=scheduler,
             scaler=scaler,
             args=args,
             epoch=epoch,
@@ -380,6 +399,7 @@ def main() -> None:
                 path=checkpoint_dir / f"epoch_{epoch:04d}.pth",
                 model=model,
                 optimizer=optimizer,
+                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,
@@ -391,6 +411,7 @@ def main() -> None:
                 path=checkpoint_dir / "final.pth",
                 model=model,
                 optimizer=optimizer,
+                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,

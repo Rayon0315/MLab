@@ -30,16 +30,18 @@ def train_one_epoch(
 
     total_samples = 0
     loss_sums: dict[str, float] = {}
+
     start_time = time.perf_counter()
 
-    for batch_index, batch in enumerate(data_loader, start=1):
+    for batch_index, batch in enumerate(
+        data_loader,
+        start=1,
+    ):
         model_inputs = prepare_model_inputs(
             model=model,
             batch=batch,
             device=device,
         )
-
-        image = model_inputs["image"]
 
         mask = batch["mask"].to(
             device,
@@ -61,7 +63,8 @@ def train_one_epoch(
         scaler.step(optimizer)
         scaler.update()
 
-        batch_size = image.shape[0]
+        batch_size = model_inputs["image"].shape[0]
+
         total_samples += batch_size
         global_step += 1
 

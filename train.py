@@ -16,13 +16,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
 
 from data.dataset import SODDataset
+from engine.model_inputs import get_model_input_keys
 from engine.trainer import train_one_epoch
 from losses.sod_loss import SODLoss
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train an RGB SOD network."
+        description="Train an SOD network.",
     )
 
     parser.add_argument(
@@ -32,27 +33,85 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--train-images",
-        default="datasets/DUTS/DUTS-TR/DUTS-TR-Image",
+        default=(
+            "datasets/DUTS/DUTS-TR/"
+            "DUTS-TR-Image"
+        ),
     )
+
     parser.add_argument(
         "--train-masks",
-        default="datasets/DUTS/DUTS-TR/DUTS-TR-Mask",
+        default=(
+            "datasets/DUTS/DUTS-TR/"
+            "DUTS-TR-Mask"
+        ),
     )
 
-    parser.add_argument("--image-size", type=int, default=352)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--train-nam",
+        default=(
+            "datasets/DUTS/DUTS-TR/"
+            "nam"
+        ),
+    )
 
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--min-lr", type=float, default=1e-6)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--aux-weight", type=float, default=0.4)
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=352,
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+    )
+
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=30,
+    )
+
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+    )
+
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-4,
+    )
+
+    parser.add_argument(
+        "--min-lr",
+        type=float,
+        default=1e-6,
+    )
+
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-4,
+    )
+
+    parser.add_argument(
+        "--aux-weight",
+        type=float,
+        default=0.4,
+    )
 
     parser.add_argument(
         "--device",
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        default=(
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        ),
     )
+
     parser.add_argument(
         "--amp",
         action=argparse.BooleanOptionalAction,
@@ -63,23 +122,46 @@ def parse_args() -> argparse.Namespace:
         "--run-dir",
         default="runs/resnet18_baseline",
     )
-    parser.add_argument("--save-every", type=int, default=5)
-    parser.add_argument("--log-interval", type=int, default=50)
 
-    parser.add_argument("--resume", default=None)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=5,
+    )
+
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=50,
+    )
+
+    parser.add_argument(
+        "--resume",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
 
     parser.add_argument(
         "--max-train-samples",
         type=int,
         default=None,
-        help="Use only the first N training samples for debugging.",
+        help=(
+            "Use only the first N training "
+            "samples for debugging."
+        ),
     )
 
     return parser.parse_args()
 
 
-def set_seed(seed: int) -> None:
+def set_seed(
+    seed: int,
+) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -108,7 +190,10 @@ def setup_logging(
 def build_model(
     network_path: str,
 ) -> tuple[torch.nn.Module, object]:
-    network_module = importlib.import_module(network_path)
+    network_module = importlib.import_module(
+        network_path
+    )
+
     model = network_module.build_model()
 
     return model, network_module
@@ -165,9 +250,18 @@ def load_checkpoint(
         checkpoint["model"],
         strict=True,
     )
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    scheduler.load_state_dict(checkpoint["scheduler"])
-    scaler.load_state_dict(checkpoint["scaler"])
+
+    optimizer.load_state_dict(
+        checkpoint["optimizer"]
+    )
+
+    scheduler.load_state_dict(
+        checkpoint["scheduler"]
+    )
+
+    scaler.load_state_dict(
+        checkpoint["scaler"]
+    )
 
     return (
         checkpoint["epoch"] + 1,
@@ -182,8 +276,13 @@ def prepare_metrics_file(
     if resume and path.exists():
         return
 
-    with path.open("w", newline="", encoding="utf-8") as file:
+    with path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
         writer = csv.writer(file)
+
         writer.writerow(
             [
                 "epoch",
@@ -203,15 +302,26 @@ def append_metrics(
     global_step: int,
     train_statistics: dict[str, float],
 ) -> None:
-    with path.open("a", newline="", encoding="utf-8") as file:
+    with path.open(
+        "a",
+        newline="",
+        encoding="utf-8",
+    ) as file:
         writer = csv.writer(file)
+
         writer.writerow(
             [
                 epoch,
                 global_step,
                 train_statistics["loss"],
-                train_statistics.get("loss_main", ""),
-                train_statistics.get("loss_aux", ""),
+                train_statistics.get(
+                    "loss_main",
+                    "",
+                ),
+                train_statistics.get(
+                    "loss_aux",
+                    "",
+                ),
                 train_statistics["lr"],
                 train_statistics["time_seconds"],
             ]
@@ -220,37 +330,73 @@ def append_metrics(
 
 def main() -> None:
     args = parse_args()
+
     set_seed(args.seed)
 
     device = torch.device(args.device)
-    use_amp = args.amp and device.type == "cuda"
+    use_amp = (
+        args.amp
+        and device.type == "cuda"
+    )
 
     run_dir = Path(args.run_dir)
     checkpoint_dir = run_dir / "checkpoints"
     log_dir = run_dir / "logs"
     source_dir = run_dir / "network_source"
 
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    source_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    log_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    source_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     setup_logging(
         log_path=log_dir / "train.log",
         resume=args.resume is not None,
     )
+
     logger = logging.getLogger(__name__)
 
-    logger.info("Run directory: %s", run_dir)
-    logger.info("Device: %s", device)
-    logger.info("AMP: %s", use_amp)
-    logger.info("Network: %s", args.network)
     logger.info(
-        "LR schedule: cosine | Initial LR: %.8f | Minimum LR: %.8f",
+        "Run directory: %s",
+        run_dir,
+    )
+
+    logger.info(
+        "Device: %s",
+        device,
+    )
+
+    logger.info(
+        "AMP: %s",
+        use_amp,
+    )
+
+    logger.info(
+        "Network: %s",
+        args.network,
+    )
+
+    logger.info(
+        "LR schedule: cosine | "
+        "Initial LR: %.8f | "
+        "Minimum LR: %.8f",
         args.lr,
         args.min_lr,
     )
 
-    with (run_dir / "args.json").open(
+    with (
+        run_dir / "args.json"
+    ).open(
         "w",
         encoding="utf-8",
     ) as file:
@@ -261,9 +407,35 @@ def main() -> None:
             ensure_ascii=False,
         )
 
-    model, network_module = build_model(args.network)
+    model, network_module = build_model(
+        args.network
+    )
 
-    network_source_path = Path(network_module.__file__)
+    model_input_keys = get_model_input_keys(
+        model
+    )
+
+    train_nam_dir = (
+        args.train_nam
+        if "nam_20" in model_input_keys
+        else None
+    )
+
+    logger.info(
+        "Model inputs: %s",
+        ", ".join(model_input_keys),
+    )
+
+    if train_nam_dir is not None:
+        logger.info(
+            "NAM directory: %s",
+            train_nam_dir,
+        )
+
+    network_source_path = Path(
+        network_module.__file__
+    )
+
     shutil.copy2(
         network_source_path,
         source_dir / network_source_path.name,
@@ -274,7 +446,11 @@ def main() -> None:
     train_dataset = SODDataset(
         image_dir=args.train_images,
         mask_dir=args.train_masks,
-        image_size=(args.image_size, args.image_size),
+        nam_dir=train_nam_dir,
+        image_size=(
+            args.image_size,
+            args.image_size,
+        ),
     )
 
     if args.max_train_samples is not None:
@@ -294,7 +470,9 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=(
+            args.num_workers > 0
+        ),
     )
 
     criterion = SODLoss(
@@ -322,7 +500,10 @@ def main() -> None:
     global_step = 0
 
     if args.resume is not None:
-        start_epoch, global_step = load_checkpoint(
+        (
+            start_epoch,
+            global_step,
+        ) = load_checkpoint(
             path=args.resume,
             model=model,
             optimizer=optimizer,
@@ -332,7 +513,10 @@ def main() -> None:
         )
 
         logger.info(
-            "Resumed from %s | Next epoch: %d | Step: %d | LR: %.8f",
+            "Resumed from %s | "
+            "Next epoch: %d | "
+            "Step: %d | "
+            "LR: %.8f",
             args.resume,
             start_epoch,
             global_step,
@@ -340,17 +524,35 @@ def main() -> None:
         )
 
     metrics_path = log_dir / "metrics.csv"
+
     prepare_metrics_file(
         path=metrics_path,
         resume=args.resume is not None,
     )
 
-    logger.info("Training samples: %d", len(train_dataset))
-    logger.info("Batches per epoch: %d", len(train_loader))
-    logger.info("Total epochs: %d", args.epochs)
+    logger.info(
+        "Training samples: %d",
+        len(train_dataset),
+    )
 
-    for epoch in range(start_epoch, args.epochs + 1):
-        train_statistics, global_step = train_one_epoch(
+    logger.info(
+        "Batches per epoch: %d",
+        len(train_loader),
+    )
+
+    logger.info(
+        "Total epochs: %d",
+        args.epochs,
+    )
+
+    for epoch in range(
+        start_epoch,
+        args.epochs + 1,
+    ):
+        (
+            train_statistics,
+            global_step,
+        ) = train_one_epoch(
             model=model,
             data_loader=train_loader,
             criterion=criterion,
@@ -373,10 +575,20 @@ def main() -> None:
         logger.info(
             "Epoch %03d completed | "
             "Train loss %.6f | "
+            "Main %.6f | "
+            "Aux %.6f | "
             "LR %.8f | "
             "Train %.1fs",
             epoch,
             train_statistics["loss"],
+            train_statistics.get(
+                "loss_main",
+                0.0,
+            ),
+            train_statistics.get(
+                "loss_aux",
+                0.0,
+            ),
             train_statistics["lr"],
             train_statistics["time_seconds"],
         )
@@ -396,7 +608,10 @@ def main() -> None:
 
         if epoch % args.save_every == 0:
             save_checkpoint(
-                path=checkpoint_dir / f"epoch_{epoch:04d}.pth",
+                path=(
+                    checkpoint_dir
+                    / f"epoch_{epoch:04d}.pth"
+                ),
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
@@ -419,7 +634,8 @@ def main() -> None:
             )
 
     logger.info(
-        "Training completed | Final checkpoint: %s",
+        "Training completed | "
+        "Final checkpoint: %s",
         checkpoint_dir / "final.pth",
     )
 

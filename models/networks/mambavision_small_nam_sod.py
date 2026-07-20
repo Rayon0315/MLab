@@ -323,6 +323,23 @@ class MambaVisionSmallNAMSOD(nn.Module):
             )
         ]
 
+        nam_size = feature1.shape[-2:]
+
+        nam_20 = F.adaptive_max_pool2d(
+            nam_20,
+            output_size=nam_size,
+        )
+
+        nam_40 = F.adaptive_max_pool2d(
+            nam_40,
+            output_size=nam_size,
+        )
+
+        nam_60 = F.adaptive_max_pool2d(
+            nam_60,
+            output_size=nam_size,
+        )
+
         nam_feature = self.nam_encoder(
             nam_20=nam_20,
             nam_40=nam_40,

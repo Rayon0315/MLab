@@ -1,5 +1,4 @@
 # train.py
-
 import argparse
 import csv
 import importlib
@@ -25,12 +24,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train an SOD network.",
     )
-
     parser.add_argument(
         "--network",
         default="models.networks.resnet18_baseline",
     )
-
     parser.add_argument(
         "--train-images",
         default=(
@@ -38,7 +35,6 @@ def parse_args() -> argparse.Namespace:
             "DUTS-TR-Image"
         ),
     )
-
     parser.add_argument(
         "--train-masks",
         default=(
@@ -46,7 +42,6 @@ def parse_args() -> argparse.Namespace:
             "DUTS-TR-Mask"
         ),
     )
-
     parser.add_argument(
         "--train-nam",
         default=(
@@ -54,55 +49,51 @@ def parse_args() -> argparse.Namespace:
             "nam"
         ),
     )
-
     parser.add_argument(
         "--image-size",
         type=int,
         default=352,
     )
-
     parser.add_argument(
         "--batch-size",
         type=int,
         default=8,
     )
-
     parser.add_argument(
         "--epochs",
         type=int,
         default=30,
     )
-
     parser.add_argument(
         "--num-workers",
         type=int,
         default=4,
     )
-
     parser.add_argument(
         "--lr",
         type=float,
         default=1e-4,
     )
-
     parser.add_argument(
         "--min-lr",
         type=float,
         default=1e-6,
     )
-
     parser.add_argument(
         "--weight-decay",
         type=float,
         default=1e-4,
     )
-
     parser.add_argument(
         "--aux-weight",
         type=float,
         default=0.4,
     )
-
+    parser.add_argument(
+        "--edge-weight",
+        type=float,
+        default=0.2,
+    )
     parser.add_argument(
         "--device",
         default=(
@@ -111,41 +102,34 @@ def parse_args() -> argparse.Namespace:
             else "cpu"
         ),
     )
-
     parser.add_argument(
         "--amp",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-
     parser.add_argument(
         "--run-dir",
         default="runs/resnet18_baseline",
     )
-
     parser.add_argument(
         "--save-every",
         type=int,
         default=5,
     )
-
     parser.add_argument(
         "--log-interval",
         type=int,
         default=50,
     )
-
     parser.add_argument(
         "--resume",
         default=None,
     )
-
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
     )
-
     parser.add_argument(
         "--max-train-samples",
         type=int,
@@ -155,13 +139,10 @@ def parse_args() -> argparse.Namespace:
             "samples for debugging."
         ),
     )
-
     return parser.parse_args()
 
 
-def set_seed(
-    seed: int,
-) -> None:
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -193,9 +174,7 @@ def build_model(
     network_module = importlib.import_module(
         network_path
     )
-
     model = network_module.build_model()
-
     return model, network_module
 
 
@@ -250,15 +229,12 @@ def load_checkpoint(
         checkpoint["model"],
         strict=True,
     )
-
     optimizer.load_state_dict(
         checkpoint["optimizer"]
     )
-
     scheduler.load_state_dict(
         checkpoint["scheduler"]
     )
-
     scaler.load_state_dict(
         checkpoint["scaler"]
     )
@@ -282,7 +258,6 @@ def prepare_metrics_file(
         encoding="utf-8",
     ) as file:
         writer = csv.writer(file)
-
         writer.writerow(
             [
                 "epoch",
@@ -290,6 +265,7 @@ def prepare_metrics_file(
                 "train_loss",
                 "train_loss_main",
                 "train_loss_aux",
+                "train_loss_edge",
                 "learning_rate",
                 "train_time_seconds",
             ]
@@ -308,7 +284,6 @@ def append_metrics(
         encoding="utf-8",
     ) as file:
         writer = csv.writer(file)
-
         writer.writerow(
             [
                 epoch,
@@ -322,6 +297,10 @@ def append_metrics(
                     "loss_aux",
                     "",
                 ),
+                train_statistics.get(
+                    "loss_edge",
+                    "",
+                ),
                 train_statistics["lr"],
                 train_statistics["time_seconds"],
             ]
@@ -330,14 +309,10 @@ def append_metrics(
 
 def main() -> None:
     args = parse_args()
-
     set_seed(args.seed)
 
     device = torch.device(args.device)
-    use_amp = (
-        args.amp
-        and device.type == "cuda"
-    )
+    use_amp = args.amp and device.type == "cuda"
 
     run_dir = Path(args.run_dir)
     checkpoint_dir = run_dir / "checkpoints"
@@ -348,12 +323,10 @@ def main() -> None:
         parents=True,
         exist_ok=True,
     )
-
     log_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
-
     source_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -363,35 +336,35 @@ def main() -> None:
         log_path=log_dir / "train.log",
         resume=args.resume is not None,
     )
-
     logger = logging.getLogger(__name__)
 
     logger.info(
         "Run directory: %s",
         run_dir,
     )
-
     logger.info(
         "Device: %s",
         device,
     )
-
     logger.info(
         "AMP: %s",
         use_amp,
     )
-
     logger.info(
         "Network: %s",
         args.network,
     )
-
     logger.info(
         "LR schedule: cosine | "
         "Initial LR: %.8f | "
         "Minimum LR: %.8f",
         args.lr,
         args.min_lr,
+    )
+    logger.info(
+        "Loss weights | Aux: %.3f | Edge: %.3f",
+        args.aux_weight,
+        args.edge_weight,
     )
 
     with (
@@ -410,11 +383,7 @@ def main() -> None:
     model, network_module = build_model(
         args.network
     )
-
-    model_input_keys = get_model_input_keys(
-        model
-    )
-
+    model_input_keys = get_model_input_keys(model)
     train_nam_dir = (
         args.train_nam
         if "nam_20" in model_input_keys
@@ -425,7 +394,6 @@ def main() -> None:
         "Model inputs: %s",
         ", ".join(model_input_keys),
     )
-
     if train_nam_dir is not None:
         logger.info(
             "NAM directory: %s",
@@ -435,7 +403,6 @@ def main() -> None:
     network_source_path = Path(
         network_module.__file__
     )
-
     shutil.copy2(
         network_source_path,
         source_dir / network_source_path.name,
@@ -477,20 +444,18 @@ def main() -> None:
 
     criterion = SODLoss(
         aux_weight=args.aux_weight,
+        edge_weight=args.edge_weight,
     )
-
     optimizer = AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-
     scheduler = CosineAnnealingLR(
         optimizer,
         T_max=args.epochs,
         eta_min=args.min_lr,
     )
-
     scaler = torch.amp.GradScaler(
         "cuda",
         enabled=use_amp,
@@ -500,10 +465,7 @@ def main() -> None:
     global_step = 0
 
     if args.resume is not None:
-        (
-            start_epoch,
-            global_step,
-        ) = load_checkpoint(
+        start_epoch, global_step = load_checkpoint(
             path=args.resume,
             model=model,
             optimizer=optimizer,
@@ -511,7 +473,6 @@ def main() -> None:
             scaler=scaler,
             network_path=args.network,
         )
-
         logger.info(
             "Resumed from %s | "
             "Next epoch: %d | "
@@ -524,7 +485,6 @@ def main() -> None:
         )
 
     metrics_path = log_dir / "metrics.csv"
-
     prepare_metrics_file(
         path=metrics_path,
         resume=args.resume is not None,
@@ -534,12 +494,10 @@ def main() -> None:
         "Training samples: %d",
         len(train_dataset),
     )
-
     logger.info(
         "Batches per epoch: %d",
         len(train_loader),
     )
-
     logger.info(
         "Total epochs: %d",
         args.epochs,
@@ -549,10 +507,7 @@ def main() -> None:
         start_epoch,
         args.epochs + 1,
     ):
-        (
-            train_statistics,
-            global_step,
-        ) = train_one_epoch(
+        train_statistics, global_step = train_one_epoch(
             model=model,
             data_loader=train_loader,
             criterion=criterion,
@@ -577,6 +532,7 @@ def main() -> None:
             "Train loss %.6f | "
             "Main %.6f | "
             "Aux %.6f | "
+            "Edge %.6f | "
             "LR %.8f | "
             "Train %.1fs",
             epoch,
@@ -587,6 +543,10 @@ def main() -> None:
             ),
             train_statistics.get(
                 "loss_aux",
+                0.0,
+            ),
+            train_statistics.get(
+                "loss_edge",
                 0.0,
             ),
             train_statistics["lr"],

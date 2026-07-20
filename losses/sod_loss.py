@@ -1,5 +1,4 @@
 # losses/sod_loss.py
-
 from typing import Any
 
 import torch
@@ -9,46 +8,31 @@ from torch import Tensor, nn
 
 class SODLoss(nn.Module):
     """
-    Default loss for binary RGB salient object detection.
-
-    The loss for one prediction is:
-
+    Saliency loss:
         BCEWithLogitsLoss + Soft IoU Loss
 
-    Expected model outputs:
+    Optional edge loss:
+        BCEWithLogitsLoss + Soft Dice Loss
 
+    Expected outputs:
         {
-            "pred": Tensor[B, 1, H, W],
-            "aux": list[Tensor]  # optional
-        }
-
-    Returned dictionary:
-
-        {
-            "loss": total_loss,
-            "loss_main": main_loss,
-            "loss_aux": auxiliary_loss,  # only when aux exists
+            "pred": Tensor,
+            "aux": list[Tensor],
+            "edge": Tensor,
         }
     """
 
     def __init__(
         self,
         aux_weight: float = 0.4,
+        edge_weight: float = 0.2,
+        edge_kernel_size: int = 3,
         smooth: float = 1.0,
     ) -> None:
         super().__init__()
-
-        if aux_weight < 0:
-            raise ValueError(
-                f"aux_weight must be non-negative, got {aux_weight}."
-            )
-
-        if smooth <= 0:
-            raise ValueError(
-                f"smooth must be positive, got {smooth}."
-            )
-
         self.aux_weight = aux_weight
+        self.edge_weight = edge_weight
+        self.edge_kernel_size = edge_kernel_size
         self.smooth = smooth
         self.bce = nn.BCEWithLogitsLoss()
 
@@ -57,183 +41,129 @@ class SODLoss(nn.Module):
         outputs: dict[str, Any],
         target: Tensor,
     ) -> dict[str, Tensor]:
-        self._check_target(target)
-
-        if "pred" not in outputs:
-            raise KeyError(
-                'Model outputs must contain the key "pred".'
-            )
-
         pred = outputs["pred"]
-
-        if not isinstance(pred, Tensor):
-            raise TypeError(
-                'outputs["pred"] must be a torch.Tensor.'
-            )
-
-        self._check_prediction(
-            prediction=pred,
-            target=target,
-            name='outputs["pred"]',
-            require_same_size=True,
-        )
-
-        main_loss = self._prediction_loss(
+        main_loss = self._saliency_loss(
             logits=pred,
             target=target,
         )
 
+        total_loss = main_loss
         loss_dict = {
-            "loss": main_loss,
+            "loss": total_loss,
             "loss_main": main_loss,
         }
 
         aux_outputs = outputs.get("aux")
-
-        if aux_outputs is None:
-            return loss_dict
-
-        if not isinstance(aux_outputs, list):
-            raise TypeError(
-                'outputs["aux"] must be a list of tensors.'
-            )
-
-        if len(aux_outputs) == 0:
-            return loss_dict
-
-        aux_losses: list[Tensor] = []
-
-        for index, aux_pred in enumerate(aux_outputs):
-            if not isinstance(aux_pred, Tensor):
-                raise TypeError(
-                    f'outputs["aux"][{index}] must be a torch.Tensor.'
-                )
-
-            self._check_prediction(
-                prediction=aux_pred,
-                target=target,
-                name=f'outputs["aux"][{index}]',
-                require_same_size=False,
-            )
-
-            if aux_pred.shape[-2:] != target.shape[-2:]:
+        if aux_outputs:
+            aux_losses = []
+            for aux_pred in aux_outputs:
                 aux_pred = F.interpolate(
                     aux_pred,
                     size=target.shape[-2:],
                     mode="bilinear",
                     align_corners=False,
                 )
-
-            aux_losses.append(
-                self._prediction_loss(
-                    logits=aux_pred,
-                    target=target,
+                aux_losses.append(
+                    self._saliency_loss(
+                        logits=aux_pred,
+                        target=target,
+                    )
                 )
+
+            auxiliary_loss = torch.stack(aux_losses).mean()
+            total_loss = total_loss + self.aux_weight * auxiliary_loss
+            loss_dict["loss_aux"] = auxiliary_loss
+
+        edge_pred = outputs.get("edge")
+        if edge_pred is not None:
+            if edge_pred.shape[-2:] != target.shape[-2:]:
+                edge_pred = F.interpolate(
+                    edge_pred,
+                    size=target.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+            edge_target = self._build_edge_target(target)
+            edge_loss = self._edge_loss(
+                logits=edge_pred,
+                target=edge_target,
             )
+            total_loss = total_loss + self.edge_weight * edge_loss
+            loss_dict["loss_edge"] = edge_loss
 
-        auxiliary_loss = torch.stack(aux_losses).mean()
-        total_loss = main_loss + self.aux_weight * auxiliary_loss
+        loss_dict["loss"] = total_loss
+        return loss_dict
 
-        return {
-            "loss": total_loss,
-            "loss_main": main_loss,
-            "loss_aux": auxiliary_loss,
-        }
-
-    def _prediction_loss(
+    def _saliency_loss(
         self,
         logits: Tensor,
         target: Tensor,
     ) -> Tensor:
-        bce_loss = self.bce(logits, target)
-        iou_loss = self._soft_iou_loss(logits, target)
+        return self.bce(logits, target) + self._soft_iou_loss(
+            logits,
+            target,
+        )
 
-        return bce_loss + iou_loss
+    def _edge_loss(
+        self,
+        logits: Tensor,
+        target: Tensor,
+    ) -> Tensor:
+        return self.bce(logits, target) + self._soft_dice_loss(
+            logits,
+            target,
+        )
 
     def _soft_iou_loss(
         self,
         logits: Tensor,
         target: Tensor,
     ) -> Tensor:
-        probability = torch.sigmoid(logits)
-
-        probability = probability.flatten(start_dim=1)
+        probability = torch.sigmoid(logits).flatten(start_dim=1)
         target = target.flatten(start_dim=1)
 
         intersection = (probability * target).sum(dim=1)
-
         union = (
             probability.sum(dim=1)
             + target.sum(dim=1)
             - intersection
         )
-
-        iou = (
-            intersection + self.smooth
-        ) / (
+        iou = (intersection + self.smooth) / (
             union + self.smooth
         )
-
         return 1.0 - iou.mean()
 
-    @staticmethod
-    def _check_target(target: Tensor) -> None:
-        if not isinstance(target, Tensor):
-            raise TypeError("target must be a torch.Tensor.")
-
-        if target.ndim != 4:
-            raise ValueError(
-                "target must have shape [B, 1, H, W], "
-                f"but got {tuple(target.shape)}."
-            )
-
-        if target.shape[1] != 1:
-            raise ValueError(
-                "target must have exactly one channel, "
-                f"but got {target.shape[1]}."
-            )
-
-        if not target.is_floating_point():
-            raise TypeError(
-                "target must be a floating-point tensor."
-            )
-
-    @staticmethod
-    def _check_prediction(
-        prediction: Tensor,
+    def _soft_dice_loss(
+        self,
+        logits: Tensor,
         target: Tensor,
-        name: str,
-        require_same_size: bool,
-    ) -> None:
-        if prediction.ndim != 4:
-            raise ValueError(
-                f"{name} must have shape [B, 1, H, W], "
-                f"but got {tuple(prediction.shape)}."
-            )
+    ) -> Tensor:
+        probability = torch.sigmoid(logits).flatten(start_dim=1)
+        target = target.flatten(start_dim=1)
 
-        if prediction.shape[1] != 1:
-            raise ValueError(
-                f"{name} must have exactly one channel, "
-                f"but got {prediction.shape[1]}."
-            )
+        intersection = (probability * target).sum(dim=1)
+        denominator = probability.sum(dim=1) + target.sum(dim=1)
+        dice = (2.0 * intersection + self.smooth) / (
+            denominator + self.smooth
+        )
+        return 1.0 - dice.mean()
 
-        if prediction.shape[0] != target.shape[0]:
-            raise ValueError(
-                f"{name} and target have different batch sizes: "
-                f"{prediction.shape[0]} and {target.shape[0]}."
-            )
-
-        if not prediction.is_floating_point():
-            raise TypeError(
-                f"{name} must be a floating-point tensor."
-            )
-
-        if (
-            require_same_size
-            and prediction.shape[-2:] != target.shape[-2:]
-        ):
-            raise ValueError(
-                f"{name} must match the target spatial size. "
-                f"Got prediction={tuple(prediction.shape[-2:])}, "
-                f"target={tuple(target.shape[-2:])}."
-            )
+    def _build_edge_target(
+        self,
+        target: Tensor,
+    ) -> Tensor:
+        padding = self.edge_kernel_size // 2
+        dilated = F.max_pool2d(
+            target,
+            kernel_size=self.edge_kernel_size,
+            stride=1,
+            padding=padding,
+        )
+        eroded = 1.0 - F.max_pool2d(
+            1.0 - target,
+            kernel_size=self.edge_kernel_size,
+            stride=1,
+            padding=padding,
+        )
+        return (dilated - eroded).clamp(0.0, 1.0)

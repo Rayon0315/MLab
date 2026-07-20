@@ -1,11 +1,10 @@
-# scripts/train_mv_hecm.sh
-
+# scripts/train_mv_hecm_reassembly.sh
 python train.py \
-    --network models.networks.mambavision_small_hecm_sod \
+    --network models.networks.mambavision_small_hecm_reassembly_sod \
     --train-images datasets/DUTS/DUTS-TR/DUTS-TR-Image \
     --train-masks datasets/DUTS/DUTS-TR/DUTS-TR-Mask \
     --train-nam datasets/DUTS/DUTS-TR/nam \
-    --run-dir runs/mv_hecm_no_edge \
+    --run-dir runs/mv_hecm_reassembly \
     --epochs 30 \
     --batch-size 8 \
     --num-workers 8 \

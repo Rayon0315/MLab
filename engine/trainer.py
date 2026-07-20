@@ -8,6 +8,8 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
+from engine.model_inputs import prepare_model_inputs
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +33,18 @@ def train_one_epoch(
     start_time = time.perf_counter()
 
     for batch_index, batch in enumerate(data_loader, start=1):
-        image = batch["image"].to(device, non_blocking=True)
-        mask = batch["mask"].to(device, non_blocking=True)
+        model_inputs = prepare_model_inputs(
+            model=model,
+            batch=batch,
+            device=device,
+        )
+
+        image = model_inputs["image"]
+
+        mask = batch["mask"].to(
+            device,
+            non_blocking=True,
+        )
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -41,7 +53,7 @@ def train_one_epoch(
             dtype=torch.float16,
             enabled=use_amp,
         ):
-            outputs = model(image)
+            outputs = model(**model_inputs)
             loss_dict = criterion(outputs, mask)
             loss = loss_dict["loss"]
 

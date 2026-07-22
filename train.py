@@ -15,7 +15,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
 
 from data.dataset import SODDataset
-from engine.model_inputs import get_model_input_keys
+from engine.model_inputs import (
+    get_model_input_keys,
+    model_uses_nam,
+)
 from engine.trainer import train_one_epoch
 from losses.sod_loss import SODLoss
 
@@ -92,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--edge-weight",
         type=float,
-        default=0.2,
+        default=0,
     )
     parser.add_argument(
         "--device",
@@ -384,9 +387,10 @@ def main() -> None:
         args.network
     )
     model_input_keys = get_model_input_keys(model)
+
     train_nam_dir = (
         args.train_nam
-        if "nam_20" in model_input_keys
+        if model_uses_nam(model)
         else None
     )
 

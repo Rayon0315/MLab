@@ -16,6 +16,15 @@ def get_model_input_keys(
     )
 
 
+def model_uses_nam(
+    model: nn.Module,
+) -> bool:
+    return any(
+        key.startswith("nam_")
+        for key in get_model_input_keys(model)
+    )
+
+
 def prepare_model_inputs(
     model: nn.Module,
     batch: dict,

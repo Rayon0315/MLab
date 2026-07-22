@@ -18,6 +18,7 @@ from tqdm import tqdm
 from data.dataset import SODDataset
 from engine.model_inputs import (
     get_model_input_keys,
+    model_uses_nam,
     prepare_model_inputs,
 )
 from metrics.sod_metrics import (
@@ -495,7 +496,7 @@ def main() -> None:
 
         test_nam_dir = (
             args.test_nam
-            if "nam_20" in model_input_keys
+            if model_uses_nam(model)
             else None
         )
 

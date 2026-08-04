@@ -5,12 +5,11 @@ cd /home/MLab
 
 python test.py \
     --network models.networks.mambavision_small_nam_sod \
-    --checkpoint runs/mambavision_small_nam_sod_duts/checkpoints/final.pth \
-    --test-images datasets/DUTS/DUTS-TE/DUTS-TE-Image \
-    --test-masks datasets/DUTS/DUTS-TE/DUTS-TE-Mask \
-    --test-nam datasets/DUTS/DUTS-TE/nam \
-    --output-dir runs/mambavision_small_nam_sod_duts/test/DUTS-TE \
-    --dataset-name DUTS-TE \
+    --checkpoint runs/test_mv_base_eorssd/checkpoints/final.pth \
+    --test-images datasets/EORSSD/test-images \
+    --test-masks datasets/EORSSD/test-labels \
+    --output-dir runs/mv_base_eorssd/test/EORSSD \
+    --dataset-name EORSSD \
     --image-size 352 \
     --batch-size 8 \
     --num-workers 8 \

@@ -1,12 +1,17 @@
-# scripts/train_mv_base_eorssd.sh
 #!/usr/bin/env bash
+# scripts/train_mv_base_eorssd.sh
+
+set -e
+
+unset OMP_NUM_THREADS
+
 cd /home/MLab
 
 python train.py \
     --network models.networks.mambavision_small_sod \
-    --run-dir runs/train_mv_base_eorssd \
-    --train-images datasets/DUTS/DUTS-TR/DUTS-TR-Image \
-    --train-masks datasets/DUTS/DUTS-TR/DUTS-TR-Mask \
+    --run-dir runs/mv_base_eorssd \
+    --train-images datasets/EORSSD/train-images \
+    --train-masks datasets/EORSSD/train-labels \
     --image-size 352 \
     --epochs 30 \
     --batch-size 8 \

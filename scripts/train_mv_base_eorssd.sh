@@ -4,7 +4,7 @@ cd /home/MLab
 
 python train.py \
     --network models.networks.mambavision_small_sod \
-    --run-dir runs/mambavision_small_sod_cosine_duts \
+    --run-dir runs/train_mv_base_eorssd \
     --train-images datasets/DUTS/DUTS-TR/DUTS-TR-Image \
     --train-masks datasets/DUTS/DUTS-TR/DUTS-TR-Mask \
     --image-size 352 \

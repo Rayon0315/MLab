@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/test_mambavision_small_nam_sod.sh
+# scripts/test_mv_base_eorssd.sh
 
 cd /home/MLab
 

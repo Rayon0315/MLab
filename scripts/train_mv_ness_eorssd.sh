@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 # scripts/train_mv_ness_eorssd.sh
 
-set -e
+set -euo pipefail
 
 unset OMP_NUM_THREADS
 
 cd /home/MLab
 
+RUN_DIR="runs/mv_ness_eorssd"
+LATEST_CHECKPOINT="${RUN_DIR}/checkpoints/latest.pth"
+
+RESUME_ARGS=()
+
+if [[ -f "${LATEST_CHECKPOINT}" ]]; then
+    RESUME_ARGS=(
+        --resume
+        "${LATEST_CHECKPOINT}"
+    )
+fi
+
 python train.py \
     --network models.networks.mambavision_small_ness_nam_sod \
-    --run-dir runs/mv_ness_eorssd \
+    --run-dir "${RUN_DIR}" \
     --train-images datasets/EORSSD/train-images \
     --train-masks datasets/EORSSD/train-labels \
     --train-nam datasets/EORSSD/train-nam \
@@ -25,4 +37,5 @@ python train.py \
     --augment-8way \
     --seed 42 \
     --save-every 5 \
-    --log-interval 100
+    --log-interval 100 \
+    "${RESUME_ARGS[@]}"

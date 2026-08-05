@@ -1,5 +1,7 @@
 # test.py
 
+from __future__ import annotations
+
 import argparse
 import importlib
 import json
@@ -12,12 +14,16 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import (
+    DataLoader,
+    Subset,
+)
 from tqdm import tqdm
 
 from data.dataset import SODDataset
 from engine.model_inputs import (
     get_model_input_keys,
+    get_model_nam_hierarchies,
     model_uses_nam,
     prepare_model_inputs,
 )
@@ -38,7 +44,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--network",
-        default="models.networks.resnet18_baseline",
+        default=(
+            "models.networks."
+            "resnet18_baseline"
+        ),
     )
 
     parser.add_argument(
@@ -104,7 +113,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--amp",
-        action=argparse.BooleanOptionalAction,
+        action=(
+            argparse.BooleanOptionalAction
+        ),
         default=True,
     )
 
@@ -120,10 +131,6 @@ def parse_args() -> argparse.Namespace:
         "--log-interval",
         type=int,
         default=1,
-        help=(
-            "Progress bar refresh interval "
-            "in batches."
-        ),
     )
 
     parser.add_argument(
@@ -136,19 +143,11 @@ def parse_args() -> argparse.Namespace:
         "--max-samples",
         type=int,
         default=None,
-        help=(
-            "Use only the first N test "
-            "samples."
-        ),
     )
 
     parser.add_argument(
         "--evaluate-only",
         action="store_true",
-        help=(
-            "Skip model inference and evaluate "
-            "the existing predictions directory."
-        ),
     )
 
     args = parser.parse_args()
@@ -186,8 +185,10 @@ def setup_logging(
 def build_model(
     network_path: str,
 ) -> nn.Module:
-    network_module = importlib.import_module(
-        network_path
+    network_module = (
+        importlib.import_module(
+            network_path
+        )
     )
 
     return network_module.build_model()
@@ -204,10 +205,14 @@ def load_checkpoint(
         weights_only=False,
     )
 
-    if checkpoint["network"] != network_path:
+    if (
+        checkpoint["network"]
+        != network_path
+    ):
         raise RuntimeError(
             "Checkpoint network does not match:\n"
-            f'checkpoint: {checkpoint["network"]}\n'
+            f'checkpoint: '
+            f'{checkpoint["network"]}\n'
             f"command: {network_path}"
         )
 
@@ -223,7 +228,9 @@ def synchronize(
     device: torch.device,
 ) -> None:
     if device.type == "cuda":
-        torch.cuda.synchronize(device)
+        torch.cuda.synchronize(
+            device
+        )
 
 
 @torch.inference_mode()
@@ -237,23 +244,33 @@ def warm_up(
     if warmup_steps <= 0:
         return
 
-    batch = next(iter(data_loader))
-
-    model_inputs = prepare_model_inputs(
-        model=model,
-        batch=batch,
-        device=device,
+    batch = next(
+        iter(data_loader)
     )
 
-    for _ in range(warmup_steps):
+    model_inputs = (
+        prepare_model_inputs(
+            model=model,
+            batch=batch,
+            device=device,
+        )
+    )
+
+    for _ in range(
+        warmup_steps
+    ):
         with torch.autocast(
             device_type=device.type,
             dtype=torch.float16,
             enabled=use_amp,
         ):
-            model(**model_inputs)
+            model(
+                **model_inputs
+            )
 
-    synchronize(device)
+    synchronize(
+        device
+    )
 
 
 @torch.inference_mode()
@@ -271,7 +288,9 @@ def run_inference(
     forward_seconds = 0.0
     prediction_save_seconds = 0.0
 
-    inference_start = time.perf_counter()
+    inference_start = (
+        time.perf_counter()
+    )
 
     progress_bar = tqdm(
         data_loader,
@@ -282,42 +301,61 @@ def run_inference(
     )
 
     for batch in progress_bar:
-        model_inputs = prepare_model_inputs(
-            model=model,
-            batch=batch,
-            device=device,
+        model_inputs = (
+            prepare_model_inputs(
+                model=model,
+                batch=batch,
+                device=device,
+            )
         )
 
-        synchronize(device)
+        synchronize(
+            device
+        )
 
-        forward_start = time.perf_counter()
+        forward_start = (
+            time.perf_counter()
+        )
 
         with torch.autocast(
             device_type=device.type,
             dtype=torch.float16,
             enabled=use_amp,
         ):
-            outputs = model(**model_inputs)
-            logits = outputs["pred"]
+            outputs = model(
+                **model_inputs
+            )
 
-        synchronize(device)
+            logits = outputs[
+                "pred"
+            ]
+
+        synchronize(
+            device
+        )
 
         forward_seconds += (
             time.perf_counter()
             - forward_start
         )
 
-        save_start = time.perf_counter()
+        save_start = (
+            time.perf_counter()
+        )
 
         for index, name in enumerate(
             batch["name"]
         ):
             original_height = int(
-                batch["original_size"][index, 0]
+                batch[
+                    "original_size"
+                ][index, 0]
             )
 
             original_width = int(
-                batch["original_size"][index, 1]
+                batch[
+                    "original_size"
+                ][index, 1]
             )
 
             restored_logits = F.interpolate(
@@ -358,7 +396,9 @@ def run_inference(
             - save_start
         )
 
-        sample_count += len(batch["name"])
+        sample_count += len(
+            batch["name"]
+        )
 
         progress_bar.set_postfix(
             saved=sample_count,
@@ -371,7 +411,9 @@ def run_inference(
 
     return {
         "samples": sample_count,
-        "forward_seconds": forward_seconds,
+        "forward_seconds": (
+            forward_seconds
+        ),
         "forward_ms_per_image": (
             forward_seconds
             * 1000
@@ -395,8 +437,10 @@ def get_device_name(
     device: torch.device,
 ) -> str:
     if device.type == "cuda":
-        return torch.cuda.get_device_name(
-            device
+        return (
+            torch.cuda.get_device_name(
+                device
+            )
         )
 
     return "CPU"
@@ -405,16 +449,22 @@ def get_device_name(
 def main() -> None:
     args = parse_args()
 
-    device = torch.device(args.device)
+    device = torch.device(
+        args.device
+    )
 
     use_amp = (
         args.amp
         and device.type == "cuda"
     )
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(
+        args.output_dir
+    )
+
     prediction_dir = (
-        output_dir / "predictions"
+        output_dir
+        / "predictions"
     )
 
     output_dir.mkdir(
@@ -426,10 +476,13 @@ def main() -> None:
         output_dir / "test.log"
     )
 
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(
+        __name__
+    )
 
     with (
-        output_dir / "test_args.json"
+        output_dir
+        / "test_args.json"
     ).open(
         "w",
         encoding="utf-8",
@@ -453,7 +506,9 @@ def main() -> None:
 
     logger.info(
         "Device name: %s",
-        get_device_name(device),
+        get_device_name(
+            device
+        ),
     )
 
     logger.info(
@@ -491,7 +546,15 @@ def main() -> None:
         )
 
         model_input_keys = (
-            get_model_input_keys(model)
+            get_model_input_keys(
+                model
+            )
+        )
+
+        nam_hierarchies = (
+            get_model_nam_hierarchies(
+                model
+            )
         )
 
         test_nam_dir = (
@@ -502,7 +565,9 @@ def main() -> None:
 
         logger.info(
             "Model inputs: %s",
-            ", ".join(model_input_keys),
+            ", ".join(
+                model_input_keys
+            ),
         )
 
         if test_nam_dir is not None:
@@ -511,25 +576,44 @@ def main() -> None:
                 test_nam_dir,
             )
 
+            logger.info(
+                "NAM hierarchies: %s",
+                ", ".join(
+                    str(hierarchy)
+                    for hierarchy
+                    in nam_hierarchies
+                ),
+            )
+
         checkpoint = load_checkpoint(
             checkpoint_path=args.checkpoint,
             model=model,
             network_path=args.network,
         )
 
-        checkpoint_epoch = checkpoint["epoch"]
-
-        checkpoint_best_metric = (
-            checkpoint.get("best_metric")
+        checkpoint_epoch = (
+            checkpoint["epoch"]
         )
 
-        model = model.to(device)
+        checkpoint_best_metric = (
+            checkpoint.get(
+                "best_metric"
+            )
+        )
+
+        model = model.to(
+            device
+        )
+
         model.eval()
 
         dataset = SODDataset(
             image_dir=args.test_images,
             mask_dir=args.test_masks,
             nam_dir=test_nam_dir,
+            nam_hierarchies=(
+                nam_hierarchies
+            ),
             image_size=(
                 args.image_size,
                 args.image_size,
@@ -562,7 +646,8 @@ def main() -> None:
 
         logger.info(
             "Loaded checkpoint | "
-            "Epoch %d | Best metric %s",
+            "Epoch %d | "
+            "Best metric %s",
             checkpoint_epoch,
             checkpoint_best_metric,
         )
@@ -580,13 +665,15 @@ def main() -> None:
             warmup_steps=args.warmup_steps,
         )
 
-        inference_statistics = run_inference(
-            model=model,
-            data_loader=data_loader,
-            device=device,
-            use_amp=use_amp,
-            prediction_dir=prediction_dir,
-            log_interval=args.log_interval,
+        inference_statistics = (
+            run_inference(
+                model=model,
+                data_loader=data_loader,
+                device=device,
+                use_amp=use_amp,
+                prediction_dir=prediction_dir,
+                log_interval=args.log_interval,
+            )
         )
 
         logger.info(
@@ -611,7 +698,9 @@ def main() -> None:
         prediction_dir,
     )
 
-    evaluation_start = time.perf_counter()
+    evaluation_start = (
+        time.perf_counter()
+    )
 
     (
         metric_results,
@@ -628,7 +717,10 @@ def main() -> None:
     )
 
     save_metric_curves(
-        path=output_dir / "curves.npz",
+        path=(
+            output_dir
+            / "curves.npz"
+        ),
         curves=metric_curves,
     )
 
@@ -657,9 +749,13 @@ def main() -> None:
                     args.batch_size
                 ),
                 "amp": use_amp,
-                "device": str(device),
+                "device": str(
+                    device
+                ),
                 "device_name": (
-                    get_device_name(device)
+                    get_device_name(
+                        device
+                    )
                 ),
                 "warmup_steps": (
                     args.warmup_steps
@@ -670,7 +766,9 @@ def main() -> None:
             else None
         ),
         "evaluation": {
-            "seconds": evaluation_seconds,
+            "seconds": (
+                evaluation_seconds
+            ),
             "prediction_space": (
                 "original_size_uint8"
             ),
@@ -688,7 +786,8 @@ def main() -> None:
     }
 
     with (
-        output_dir / "metrics.json"
+        output_dir
+        / "metrics.json"
     ).open(
         "w",
         encoding="utf-8",
@@ -702,7 +801,8 @@ def main() -> None:
 
     logger.info(
         "Evaluation completed | "
-        "Samples %d | Time %.1fs",
+        "Samples %d | "
+        "Time %.1fs",
         evaluated_samples,
         evaluation_seconds,
     )
@@ -757,12 +857,14 @@ def main() -> None:
 
     logger.info(
         "Metrics: %s",
-        output_dir / "metrics.json",
+        output_dir
+        / "metrics.json",
     )
 
     logger.info(
         "Curves: %s",
-        output_dir / "curves.npz",
+        output_dir
+        / "curves.npz",
     )
 
 

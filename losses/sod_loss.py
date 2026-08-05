@@ -1,4 +1,7 @@
 # losses/sod_loss.py
+
+from __future__ import annotations
+
 from typing import Any
 
 import torch
@@ -66,35 +69,45 @@ class SODLoss(nn.Module):
 
         total_loss = main_loss
 
-        loss_dict = {
-            "loss": total_loss,
+        loss_dict: dict[
+            str,
+            Tensor,
+        ] = {
             "loss_main": main_loss,
         }
 
-        aux_outputs = outputs.get(
+        auxiliary_outputs = outputs.get(
             "aux"
         )
 
-        if aux_outputs:
-            aux_losses = []
+        if auxiliary_outputs:
+            auxiliary_losses: list[
+                Tensor
+            ] = []
 
-            for aux_pred in aux_outputs:
-                aux_pred = F.interpolate(
-                    aux_pred,
-                    size=target.shape[-2:],
-                    mode="bilinear",
-                    align_corners=False,
+            for auxiliary_prediction in (
+                auxiliary_outputs
+            ):
+                auxiliary_prediction = (
+                    F.interpolate(
+                        auxiliary_prediction,
+                        size=target.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
                 )
 
-                aux_losses.append(
+                auxiliary_losses.append(
                     self._saliency_loss(
-                        logits=aux_pred,
+                        logits=(
+                            auxiliary_prediction
+                        ),
                         target=target,
                     )
                 )
 
             auxiliary_loss = torch.stack(
-                aux_losses
+                auxiliary_losses
             ).mean()
 
             total_loss = (
@@ -107,30 +120,42 @@ class SODLoss(nn.Module):
                 "loss_aux"
             ] = auxiliary_loss
 
-        edge_pred = outputs.get(
+        edge_prediction = outputs.get(
             "edge"
         )
 
-        if edge_pred is not None:
-            edge_pred = F.interpolate(
-                edge_pred,
+        if edge_prediction is not None:
+            edge_prediction = F.interpolate(
+                edge_prediction,
                 size=target.shape[-2:],
                 mode="bilinear",
                 align_corners=False,
             )
 
+            edge_prediction_float = (
+                edge_prediction.float()
+            )
+
+            saliency_probability = (
+                torch.sigmoid(
+                    pred.detach().float()
+                )
+            )
+
             prediction_edge_target = (
                 self._label_edge_prediction(
-                    torch.sigmoid(
-                        pred
-                    ).detach()
+                    saliency_probability
                 )
             )
 
             edge_consistency_loss = (
                 self._structure_loss(
-                    logits=edge_pred,
-                    target=prediction_edge_target,
+                    logits=(
+                        edge_prediction_float
+                    ),
+                    target=(
+                        prediction_edge_target
+                    ),
                 )
             )
 
@@ -143,20 +168,30 @@ class SODLoss(nn.Module):
             ] = edge_consistency_loss
 
             if nam_target is not None:
-                nam_target = F.interpolate(
-                    nam_target,
-                    size=target.shape[-2:],
-                    mode="nearest",
+                nam_target_float = (
+                    nam_target.detach().float()
                 )
 
-                nam_target = (
-                    nam_target > 0.5
+                nam_target_float = (
+                    F.interpolate(
+                        nam_target_float,
+                        size=target.shape[-2:],
+                        mode="nearest",
+                    )
+                )
+
+                nam_target_float = (
+                    nam_target_float > 0.5
                 ).float()
 
                 nam_edge_loss = (
                     self._ness_dice_loss(
-                        logits=edge_pred,
-                        target=nam_target,
+                        logits=(
+                            edge_prediction_float
+                        ),
+                        target=(
+                            nam_target_float
+                        ),
                     )
                 )
 
@@ -179,9 +214,7 @@ class SODLoss(nn.Module):
                 "loss_edge"
             ] = edge_loss
 
-        loss_dict["loss"] = (
-            total_loss
-        )
+        loss_dict["loss"] = total_loss
 
         return loss_dict
 
@@ -190,15 +223,19 @@ class SODLoss(nn.Module):
         logits: Tensor,
         target: Tensor,
     ) -> Tensor:
+        binary_cross_entropy = self.bce(
+            logits,
+            target,
+        )
+
+        soft_iou = self._soft_iou_loss(
+            logits=logits,
+            target=target,
+        )
+
         return (
-            self.bce(
-                logits,
-                target,
-            )
-            + self._soft_iou_loss(
-                logits,
-                target,
-            )
+            binary_cross_entropy
+            + soft_iou
         )
 
     def _soft_iou_loss(
@@ -208,35 +245,48 @@ class SODLoss(nn.Module):
     ) -> Tensor:
         probability = torch.sigmoid(
             logits
-        ).flatten(start_dim=1)
+        ).flatten(
+            start_dim=1
+        )
 
-        target = target.flatten(
+        flattened_target = target.flatten(
             start_dim=1
         )
 
         intersection = (
-            probability * target
-        ).sum(dim=1)
+            probability
+            * flattened_target
+        ).sum(
+            dim=1
+        )
 
         union = (
             probability.sum(dim=1)
-            + target.sum(dim=1)
+            + flattened_target.sum(dim=1)
             - intersection
         )
 
         iou = (
-            intersection + self.smooth
+            intersection
+            + self.smooth
         ) / (
-            union + self.smooth
+            union
+            + self.smooth
         )
 
-        return 1.0 - iou.mean()
+        return (
+            1.0
+            - iou.mean()
+        )
 
     def _structure_loss(
         self,
         logits: Tensor,
         target: Tensor,
     ) -> Tensor:
+        logits = logits.float()
+        target = target.float()
+
         weight = (
             1.0
             + 5.0
@@ -271,8 +321,12 @@ class SODLoss(nn.Module):
             (
                 weight
                 * weighted_bce
-            ).sum(dim=(2, 3))
-            / weight.sum(dim=(2, 3))
+            ).sum(
+                dim=(2, 3)
+            )
+            / weight.sum(
+                dim=(2, 3)
+            )
         )
 
         probability = torch.sigmoid(
@@ -283,7 +337,9 @@ class SODLoss(nn.Module):
             probability
             * target
             * weight
-        ).sum(dim=(2, 3))
+        ).sum(
+            dim=(2, 3)
+        )
 
         union = (
             (
@@ -291,12 +347,15 @@ class SODLoss(nn.Module):
                 + target
             )
             * weight
-        ).sum(dim=(2, 3))
+        ).sum(
+            dim=(2, 3)
+        )
 
         weighted_iou = (
             1.0
             - (
-                intersection + 1.0
+                intersection
+                + 1.0
             )
             / (
                 union
@@ -316,63 +375,98 @@ class SODLoss(nn.Module):
         target: Tensor,
     ) -> Tensor:
         probability = torch.sigmoid(
-            logits
-        ).flatten(start_dim=1)
-
-        target = target.flatten(
+            logits.float()
+        ).flatten(
             start_dim=1
+        )
+
+        flattened_target = (
+            target.float().flatten(
+                start_dim=1
+            )
         )
 
         numerator = (
             2.0
             * (
                 probability
-                * target
-            ).sum(dim=1)
+                * flattened_target
+            ).sum(
+                dim=1
+            )
             + self.smooth
         )
 
         denominator = (
-            probability.pow(2).sum(dim=1)
-            + target.pow(2).sum(dim=1)
+            probability.pow(2).sum(
+                dim=1
+            )
+            + flattened_target.pow(2).sum(
+                dim=1
+            )
             + self.smooth
+        )
+
+        dice = (
+            numerator
+            / denominator
         )
 
         return (
             1.0
-            - numerator
-            / denominator
+            - dice
         ).mean()
 
     def _label_edge_prediction(
         self,
         target: Tensor,
     ) -> Tensor:
-        target = (
-            target > 0.5
-        ).float()
-
-        target = F.pad(
-            target,
-            pad=(1, 1, 1, 1),
-            mode="replicate",
+        device_type = (
+            target.device.type
         )
 
-        gradient_x = F.conv2d(
-            target,
-            self.sobel_x,
-        )
+        with torch.autocast(
+            device_type=device_type,
+            enabled=False,
+        ):
+            binary_target = (
+                target.detach().float()
+                > 0.5
+            ).float()
 
-        gradient_y = F.conv2d(
-            target,
-            self.sobel_y,
-        )
+            binary_target = F.pad(
+                binary_target,
+                pad=(1, 1, 1, 1),
+                mode="replicate",
+            )
 
-        gradient = torch.sqrt(
-            gradient_x.pow(2)
-            + gradient_y.pow(2)
-        )
+            sobel_x = self.sobel_x.to(
+                device=binary_target.device,
+                dtype=torch.float32,
+            )
 
-        return (
-            gradient > 1.5
-        ).float()
+            sobel_y = self.sobel_y.to(
+                device=binary_target.device,
+                dtype=torch.float32,
+            )
+
+            gradient_x = F.conv2d(
+                binary_target,
+                sobel_x,
+            )
+
+            gradient_y = F.conv2d(
+                binary_target,
+                sobel_y,
+            )
+
+            gradient = torch.sqrt(
+                gradient_x.square()
+                + gradient_y.square()
+            )
+
+            edge_target = (
+                gradient > 1.5
+            ).float()
+
+        return edge_target

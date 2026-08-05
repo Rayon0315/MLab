@@ -1,5 +1,7 @@
 # data/dataset.py
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
@@ -23,7 +25,7 @@ class SODSample(TypedDict):
 
 
 class SODDataset(Dataset):
-    """RGB SOD dataset with optional NAMLab edge maps."""
+    """RGB SOD dataset with optional NAMLab maps."""
 
     IMAGE_SUFFIXES = {
         ".jpg",
@@ -54,11 +56,7 @@ class SODDataset(Dataset):
         image_dir: str | Path,
         mask_dir: str | Path,
         nam_dir: str | Path | None = None,
-        nam_hierarchies: tuple[int, ...] = (
-            20,
-            40,
-            60,
-        ),
+        nam_hierarchies: tuple[int, ...] = (),
         image_size: tuple[int, int] = (352, 352),
         augment_8way: bool = False,
     ) -> None:
@@ -69,10 +67,11 @@ class SODDataset(Dataset):
             if nam_dir is not None
             else None
         )
+
         self.image_size = image_size
         self.augment_8way = augment_8way
         self.nam_hierarchies = tuple(
-            nam_hierarchies
+            sorted(set(nam_hierarchies))
         )
 
         self.image_map = self._collect_file_map(
@@ -85,31 +84,70 @@ class SODDataset(Dataset):
             allowed_suffixes=self.MASK_SUFFIXES,
         )
 
-        self.names = sorted(self.image_map)
+        if not self.image_map:
+            raise RuntimeError(
+                f"No images found in {self.image_dir}"
+            )
 
-        self.nam_maps: dict[int, dict[str, Path]] | None = None
+        missing_masks = sorted(
+            set(self.image_map)
+            - set(self.mask_map)
+        )
 
-        if self.nam_dir is not None:
+        if missing_masks:
+            preview = ", ".join(
+                missing_masks[:20]
+            )
+
+            raise FileNotFoundError(
+                "Missing masks | "
+                f"count={len(missing_masks)} | "
+                f"samples={preview} | "
+                f"directory={self.mask_dir}"
+            )
+
+        self.names = sorted(
+            self.image_map
+        )
+
+        self.nam_maps: dict[
+            int,
+            dict[str, Path],
+        ] = {}
+
+        if self.nam_hierarchies:
+            if self.nam_dir is None:
+                raise ValueError(
+                    "NAM hierarchies were requested, "
+                    "but nam_dir is None."
+                )
+
             self.nam_maps = {
                 hierarchy: self._collect_file_map(
                     directory=(
                         self.nam_dir
                         / f"hier_{hierarchy}"
                     ),
-                    allowed_suffixes=(
-                        self.MASK_SUFFIXES
-                    ),
+                    allowed_suffixes=self.MASK_SUFFIXES,
                 )
-                for hierarchy in (
-                    self.nam_hierarchies
-                )
+                for hierarchy in self.nam_hierarchies
             }
 
+            self._validate_nam_maps()
+
     def __len__(self) -> int:
-        multiplier = 8 if self.augment_8way else 1
+        multiplier = (
+            8
+            if self.augment_8way
+            else 1
+        )
+
         return len(self.names) * multiplier
 
-    def __getitem__(self, index: int) -> SODSample:
+    def __getitem__(
+        self,
+        index: int,
+    ) -> SODSample:
         if self.augment_8way:
             base_index, transform_index = divmod(
                 index,
@@ -121,16 +159,23 @@ class SODDataset(Dataset):
 
         name = self.names[base_index]
 
-        image_path = self.image_map[name]
-        mask_path = self.mask_map[name]
+        image = self._read_rgb_image(
+            self.image_map[name]
+        )
 
-        image = self._read_rgb_image(image_path)
-        mask = self._read_binary_map(mask_path)
+        mask = self._read_binary_map(
+            self.mask_map[name]
+        )
 
-        original_width, original_height = image.size
+        original_width, original_height = (
+            image.size
+        )
 
         original_size = torch.tensor(
-            [original_height, original_width],
+            [
+                original_height,
+                original_width,
+            ],
             dtype=torch.long,
         )
 
@@ -144,8 +189,14 @@ class SODDataset(Dataset):
             transform_index,
         )
 
-        target_height, target_width = self.image_size
-        target_size = (target_width, target_height)
+        target_height, target_width = (
+            self.image_size
+        )
+
+        target_size = (
+            target_width,
+            target_height,
+        )
 
         image = image.resize(
             target_size,
@@ -158,53 +209,72 @@ class SODDataset(Dataset):
         )
 
         sample: SODSample = {
-            "image": self._image_to_tensor(image),
-            "mask": self._binary_to_tensor(mask),
+            "image": self._image_to_tensor(
+                image
+            ),
+            "mask": self._binary_to_tensor(
+                mask
+            ),
             "name": name,
             "original_size": original_size,
         }
 
-        if self.nam_maps is not None:
-            for hierarchy in self.nam_hierarchies:
-                nam_path = self.nam_maps[
+        for hierarchy in self.nam_hierarchies:
+            nam_map = self._read_binary_map(
+                self.nam_maps[
                     hierarchy
-                ].get(name)
+                ][name]
+            )
 
-                if nam_path is None:
-                    raise FileNotFoundError(
-                        "Missing NAMLab map | "
-                        f"sample={name} | "
-                        f"hierarchy={hierarchy} | "
-                        f"directory="
-                        f"{self.nam_dir}/"
-                        f"hier_{hierarchy}"
-                    )
-
-                nam_map = self._read_binary_map(
-                    nam_path
+            nam_map = (
+                self._apply_geometric_transform(
+                    nam_map,
+                    transform_index,
                 )
+            )
 
-                nam_map = (
-                    self._apply_geometric_transform(
-                        nam_map,
-                        transform_index,
-                    )
-                )
+            nam_map = nam_map.resize(
+                target_size,
+                resample=Image.Resampling.NEAREST,
+            )
 
-                nam_map = nam_map.resize(
-                    target_size,
-                    resample=(
-                        Image.Resampling.NEAREST
-                    ),
-                )
-
-                sample[
-                    f"nam_{hierarchy}"
-                ] = self._binary_to_tensor(
-                    nam_map
-                )
+            sample[
+                f"nam_{hierarchy}"
+            ] = self._binary_to_tensor(
+                nam_map
+            )
 
         return sample
+
+    def _validate_nam_maps(
+        self,
+    ) -> None:
+        for hierarchy in self.nam_hierarchies:
+            missing_names = sorted(
+                set(self.names)
+                - set(
+                    self.nam_maps[
+                        hierarchy
+                    ]
+                )
+            )
+
+            if not missing_names:
+                continue
+
+            preview = ", ".join(
+                missing_names[:20]
+            )
+
+            raise FileNotFoundError(
+                "Missing NAMLab maps | "
+                f"hierarchy={hierarchy} | "
+                f"count={len(missing_names)} | "
+                f"samples={preview} | "
+                f"directory="
+                f"{self.nam_dir}/"
+                f"hier_{hierarchy}"
+            )
 
     @staticmethod
     def _apply_geometric_transform(
@@ -252,7 +322,8 @@ class SODDataset(Dataset):
             )
 
         raise ValueError(
-            f"Invalid transform index: {transform_index}"
+            "Invalid transform index: "
+            f"{transform_index}"
         )
 
     @staticmethod
@@ -260,28 +331,52 @@ class SODDataset(Dataset):
         directory: Path,
         allowed_suffixes: set[str],
     ) -> dict[str, Path]:
+        if not directory.is_dir():
+            raise FileNotFoundError(
+                f"Directory not found: {directory}"
+            )
+
         return {
             path.stem: path
-            for path in sorted(directory.iterdir())
+            for path in sorted(
+                directory.iterdir()
+            )
             if path.is_file()
-            and path.suffix.lower() in allowed_suffixes
+            and path.suffix.lower()
+            in allowed_suffixes
         }
 
     @staticmethod
     def _read_rgb_image(
         path: Path,
     ) -> Image.Image:
-        with Image.open(path) as raw_image:
-            image = ImageOps.exif_transpose(raw_image)
-            return image.convert("RGB")
+        with Image.open(
+            path
+        ) as raw_image:
+            image = ImageOps.exif_transpose(
+                raw_image
+            )
+
+            return image.convert(
+                "RGB"
+            )
 
     @staticmethod
     def _read_binary_map(
         path: Path,
     ) -> Image.Image:
-        with Image.open(path) as raw_map:
-            binary_map = ImageOps.exif_transpose(raw_map)
-            return binary_map.convert("L")
+        with Image.open(
+            path
+        ) as raw_map:
+            binary_map = (
+                ImageOps.exif_transpose(
+                    raw_map
+                )
+            )
+
+            return binary_map.convert(
+                "L"
+            )
 
     @classmethod
     def _image_to_tensor(
@@ -298,19 +393,20 @@ class SODDataset(Dataset):
             image_array
         )
 
-        image_tensor = image_tensor.permute(
-            2,
-            0,
-            1,
-        ).contiguous()
-
-        image_tensor = image_tensor / 255.0
+        image_tensor = (
+            image_tensor
+            .permute(2, 0, 1)
+            .contiguous()
+        )
 
         image_tensor = (
-            image_tensor - cls.IMAGE_MEAN
-        ) / cls.IMAGE_STD
+            image_tensor / 255.0
+        )
 
-        return image_tensor
+        return (
+            image_tensor
+            - cls.IMAGE_MEAN
+        ) / cls.IMAGE_STD
 
     @staticmethod
     def _binary_to_tensor(
@@ -322,11 +418,16 @@ class SODDataset(Dataset):
             copy=True,
         )
 
-        map_tensor = torch.from_numpy(
-            map_array
-        ).unsqueeze(0)
+        map_tensor = (
+            torch.from_numpy(
+                map_array
+            )
+            .unsqueeze(0)
+        )
 
-        map_tensor = map_tensor / 255.0
+        map_tensor = (
+            map_tensor / 255.0
+        )
 
         return (
             map_tensor >= 0.5

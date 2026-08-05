@@ -98,6 +98,15 @@ def parse_args() -> argparse.Namespace:
         default=0,
     )
     parser.add_argument(
+        "--augment-8way",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Expand the training set with eight "
+            "fixed rotation and flip variants."
+        ),
+    )
+    parser.add_argument(
         "--device",
         default=(
             "cuda"
@@ -358,6 +367,10 @@ def main() -> None:
         args.network,
     )
     logger.info(
+        "8-way augmentation: %s",
+        args.augment_8way,
+    )
+    logger.info(
         "LR schedule: cosine | "
         "Initial LR: %.8f | "
         "Minimum LR: %.8f",
@@ -422,6 +435,7 @@ def main() -> None:
             args.image_size,
             args.image_size,
         ),
+        augment_8way=args.augment_8way,
     )
 
     if args.max_train_samples is not None:

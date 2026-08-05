@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/test_mv_base_eorssd.sh
+# scripts/test_mv_base_eorssd_aug8.sh
 
 set -e
 
@@ -9,10 +9,10 @@ cd /home/MLab
 
 python test.py \
     --network models.networks.mambavision_small_sod \
-    --checkpoint runs/mv_base_eorssd/checkpoints/final.pth \
+    --checkpoint runs/mv_base_eorssd_aug8_e45/checkpoints/final.pth \
     --test-images datasets/EORSSD/test-images \
     --test-masks datasets/EORSSD/test-labels \
-    --output-dir runs/mv_base_eorssd/test/EORSSD \
+    --output-dir runs/mv_base_eorssd_aug8_e45/test/EORSSD \
     --dataset-name EORSSD \
     --image-size 352 \
     --batch-size 8 \

@@ -55,6 +55,7 @@ class SODDataset(Dataset):
         mask_dir: str | Path,
         nam_dir: str | Path | None = None,
         image_size: tuple[int, int] = (352, 352),
+        augment_8way: bool = False,
     ) -> None:
         self.image_dir = Path(image_dir)
         self.mask_dir = Path(mask_dir)
@@ -64,6 +65,7 @@ class SODDataset(Dataset):
             else None
         )
         self.image_size = image_size
+        self.augment_8way = augment_8way
 
         self.image_map = self._collect_file_map(
             directory=self.image_dir,
@@ -89,10 +91,20 @@ class SODDataset(Dataset):
             }
 
     def __len__(self) -> int:
-        return len(self.names)
+        multiplier = 8 if self.augment_8way else 1
+        return len(self.names) * multiplier
 
     def __getitem__(self, index: int) -> SODSample:
-        name = self.names[index]
+        if self.augment_8way:
+            base_index, transform_index = divmod(
+                index,
+                8,
+            )
+        else:
+            base_index = index
+            transform_index = 0
+
+        name = self.names[base_index]
 
         image_path = self.image_map[name]
         mask_path = self.mask_map[name]
@@ -105,6 +117,16 @@ class SODDataset(Dataset):
         original_size = torch.tensor(
             [original_height, original_width],
             dtype=torch.long,
+        )
+
+        image = self._apply_geometric_transform(
+            image,
+            transform_index,
+        )
+
+        mask = self._apply_geometric_transform(
+            mask,
+            transform_index,
         )
 
         target_height, target_width = self.image_size
@@ -140,6 +162,21 @@ class SODDataset(Dataset):
                 self.nam_maps[60][name]
             )
 
+            nam_20 = self._apply_geometric_transform(
+                nam_20,
+                transform_index,
+            )
+
+            nam_40 = self._apply_geometric_transform(
+                nam_40,
+                transform_index,
+            )
+
+            nam_60 = self._apply_geometric_transform(
+                nam_60,
+                transform_index,
+            )
+
             nam_20 = nam_20.resize(
                 target_size,
                 resample=Image.Resampling.NEAREST,
@@ -168,6 +205,55 @@ class SODDataset(Dataset):
             )
 
         return sample
+
+    @staticmethod
+    def _apply_geometric_transform(
+        image: Image.Image,
+        transform_index: int,
+    ) -> Image.Image:
+        if transform_index == 0:
+            return image
+
+        if transform_index == 1:
+            return image.transpose(
+                Image.Transpose.ROTATE_90
+            )
+
+        if transform_index == 2:
+            return image.transpose(
+                Image.Transpose.ROTATE_180
+            )
+
+        if transform_index == 3:
+            return image.transpose(
+                Image.Transpose.ROTATE_270
+            )
+
+        flipped = image.transpose(
+            Image.Transpose.FLIP_LEFT_RIGHT
+        )
+
+        if transform_index == 4:
+            return flipped
+
+        if transform_index == 5:
+            return flipped.transpose(
+                Image.Transpose.ROTATE_90
+            )
+
+        if transform_index == 6:
+            return flipped.transpose(
+                Image.Transpose.ROTATE_180
+            )
+
+        if transform_index == 7:
+            return flipped.transpose(
+                Image.Transpose.ROTATE_270
+            )
+
+        raise ValueError(
+            f"Invalid transform index: {transform_index}"
+        )
 
     @staticmethod
     def _collect_file_map(

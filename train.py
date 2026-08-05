@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, Subset
 from data.dataset import SODDataset
 from engine.model_inputs import (
     get_model_input_keys,
+    get_model_nam_hierarchies,
     model_uses_nam,
 )
 from engine.trainer import train_one_epoch
@@ -400,6 +401,11 @@ def main() -> None:
         args.network
     )
     model_input_keys = get_model_input_keys(model)
+    nam_hierarchies = (
+        get_model_nam_hierarchies(
+            model
+        )
+    )
 
     train_nam_dir = (
         args.train_nam
@@ -416,6 +422,15 @@ def main() -> None:
             "NAM directory: %s",
             train_nam_dir,
         )
+    
+    if nam_hierarchies:
+        logger.info(
+            "NAM hierarchies: %s",
+            ", ".join(
+                str(hierarchy)
+                for hierarchy in nam_hierarchies
+            ),
+        )
 
     network_source_path = Path(
         network_module.__file__
@@ -431,6 +446,7 @@ def main() -> None:
         image_dir=args.train_images,
         mask_dir=args.train_masks,
         nam_dir=train_nam_dir,
+        nam_hierarchies=nam_hierarchies,
         image_size=(
             args.image_size,
             args.image_size,

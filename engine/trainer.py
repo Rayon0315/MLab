@@ -48,30 +48,64 @@ def train_one_epoch(
             non_blocking=True,
         )
 
-        optimizer.zero_grad(set_to_none=True)
+        nam_target = batch.get(
+            "nam_60"
+        )
+
+        if nam_target is not None:
+            nam_target = nam_target.to(
+                device,
+                non_blocking=True,
+            )
+
+        optimizer.zero_grad(
+            set_to_none=True
+        )
 
         with torch.autocast(
             device_type=device.type,
             dtype=torch.float16,
             enabled=use_amp,
         ):
-            outputs = model(**model_inputs)
-            loss_dict = criterion(outputs, mask)
+            outputs = model(
+                **model_inputs
+            )
+
+            loss_dict = criterion(
+                outputs,
+                mask,
+                nam_target=nam_target,
+            )
+
             loss = loss_dict["loss"]
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
+        scaler.scale(
+            loss
+        ).backward()
+
+        scaler.step(
+            optimizer
+        )
+
         scaler.update()
 
-        batch_size = model_inputs["image"].shape[0]
+        batch_size = model_inputs[
+            "image"
+        ].shape[0]
 
         total_samples += batch_size
         global_step += 1
 
-        for name, value in loss_dict.items():
+        for name, value in (
+            loss_dict.items()
+        ):
             loss_sums[name] = (
-                loss_sums.get(name, 0.0)
-                + value.detach().item() * batch_size
+                loss_sums.get(
+                    name,
+                    0.0,
+                )
+                + value.detach().item()
+                * batch_size
             )
 
         if (
@@ -79,8 +113,10 @@ def train_one_epoch(
             or batch_index == len(data_loader)
         ):
             logger.info(
-                "Epoch %03d | Batch %05d/%05d | "
-                "Step %07d | Loss %.6f",
+                "Epoch %03d | "
+                "Batch %05d/%05d | "
+                "Step %07d | "
+                "Loss %.6f",
                 epoch,
                 batch_index,
                 len(data_loader),
@@ -88,14 +124,29 @@ def train_one_epoch(
                 loss.detach().item(),
             )
 
-    elapsed_time = time.perf_counter() - start_time
+    elapsed_time = (
+        time.perf_counter()
+        - start_time
+    )
 
     statistics = {
         name: value / total_samples
-        for name, value in loss_sums.items()
+        for name, value in (
+            loss_sums.items()
+        )
     }
 
-    statistics["lr"] = optimizer.param_groups[0]["lr"]
-    statistics["time_seconds"] = elapsed_time
+    statistics["lr"] = (
+        optimizer.param_groups[0][
+            "lr"
+        ]
+    )
 
-    return statistics, global_step
+    statistics[
+        "time_seconds"
+    ] = elapsed_time
+
+    return (
+        statistics,
+        global_step,
+    )

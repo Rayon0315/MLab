@@ -54,6 +54,11 @@ class SODDataset(Dataset):
         image_dir: str | Path,
         mask_dir: str | Path,
         nam_dir: str | Path | None = None,
+        nam_hierarchies: tuple[int, ...] = (
+            20,
+            40,
+            60,
+        ),
         image_size: tuple[int, int] = (352, 352),
         augment_8way: bool = False,
     ) -> None:
@@ -66,6 +71,9 @@ class SODDataset(Dataset):
         )
         self.image_size = image_size
         self.augment_8way = augment_8way
+        self.nam_hierarchies = tuple(
+            nam_hierarchies
+        )
 
         self.image_map = self._collect_file_map(
             directory=self.image_dir,
@@ -84,10 +92,17 @@ class SODDataset(Dataset):
         if self.nam_dir is not None:
             self.nam_maps = {
                 hierarchy: self._collect_file_map(
-                    directory=self.nam_dir / f"hier_{hierarchy}",
-                    allowed_suffixes=self.MASK_SUFFIXES,
+                    directory=(
+                        self.nam_dir
+                        / f"hier_{hierarchy}"
+                    ),
+                    allowed_suffixes=(
+                        self.MASK_SUFFIXES
+                    ),
                 )
-                for hierarchy in (20, 40, 60)
+                for hierarchy in (
+                    self.nam_hierarchies
+                )
             }
 
     def __len__(self) -> int:
@@ -150,59 +165,44 @@ class SODDataset(Dataset):
         }
 
         if self.nam_maps is not None:
-            nam_20 = self._read_binary_map(
-                self.nam_maps[20][name]
-            )
+            for hierarchy in self.nam_hierarchies:
+                nam_path = self.nam_maps[
+                    hierarchy
+                ].get(name)
 
-            nam_40 = self._read_binary_map(
-                self.nam_maps[40][name]
-            )
+                if nam_path is None:
+                    raise FileNotFoundError(
+                        "Missing NAMLab map | "
+                        f"sample={name} | "
+                        f"hierarchy={hierarchy} | "
+                        f"directory="
+                        f"{self.nam_dir}/"
+                        f"hier_{hierarchy}"
+                    )
 
-            nam_60 = self._read_binary_map(
-                self.nam_maps[60][name]
-            )
+                nam_map = self._read_binary_map(
+                    nam_path
+                )
 
-            nam_20 = self._apply_geometric_transform(
-                nam_20,
-                transform_index,
-            )
+                nam_map = (
+                    self._apply_geometric_transform(
+                        nam_map,
+                        transform_index,
+                    )
+                )
 
-            nam_40 = self._apply_geometric_transform(
-                nam_40,
-                transform_index,
-            )
+                nam_map = nam_map.resize(
+                    target_size,
+                    resample=(
+                        Image.Resampling.NEAREST
+                    ),
+                )
 
-            nam_60 = self._apply_geometric_transform(
-                nam_60,
-                transform_index,
-            )
-
-            nam_20 = nam_20.resize(
-                target_size,
-                resample=Image.Resampling.NEAREST,
-            )
-
-            nam_40 = nam_40.resize(
-                target_size,
-                resample=Image.Resampling.NEAREST,
-            )
-
-            nam_60 = nam_60.resize(
-                target_size,
-                resample=Image.Resampling.NEAREST,
-            )
-
-            sample["nam_20"] = self._binary_to_tensor(
-                nam_20
-            )
-
-            sample["nam_40"] = self._binary_to_tensor(
-                nam_40
-            )
-
-            sample["nam_60"] = self._binary_to_tensor(
-                nam_60
-            )
+                sample[
+                    f"nam_{hierarchy}"
+                ] = self._binary_to_tensor(
+                    nam_map
+                )
 
         return sample
 

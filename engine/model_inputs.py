@@ -79,6 +79,46 @@ def get_model_nam_hierarchies(
     )
 
 
+def get_model_mean_keys(
+    model: nn.Module,
+) -> tuple[str, ...]:
+    return tuple(
+        key
+        for key
+        in get_model_input_keys(model)
+        if key.startswith("mean_")
+    )
+
+
+def get_model_mean_hierarchies(
+    model: nn.Module,
+) -> tuple[int, ...]:
+    hierarchies: list[int] = []
+
+    for key in get_model_mean_keys(
+        model
+    ):
+        hierarchy_text = (
+            key.removeprefix(
+                "mean_"
+            )
+        )
+
+        if not hierarchy_text.isdigit():
+            raise ValueError(
+                "Invalid region-mean input key: "
+                f"{key}"
+            )
+
+        hierarchies.append(
+            int(hierarchy_text)
+        )
+
+    return tuple(
+        hierarchies
+    )
+
+
 def get_edge_target_key(
     model: nn.Module,
 ) -> str | None:
@@ -125,6 +165,16 @@ def model_uses_nam(
 ) -> bool:
     return bool(
         get_model_nam_keys(
+            model
+        )
+    )
+
+
+def model_uses_mean(
+    model: nn.Module,
+) -> bool:
+    return bool(
+        get_model_mean_keys(
             model
         )
     )

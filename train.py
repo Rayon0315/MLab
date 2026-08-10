@@ -117,7 +117,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--edge-weight",
         type=float,
-        default=0,
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--region-weight",
+        type=float,
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--region-hierarchy",
+        type=int,
+        default=60,
     )
 
     parser.add_argument(
@@ -189,21 +201,10 @@ def parse_args() -> argparse.Namespace:
 def set_seed(
     seed: int,
 ) -> None:
-    random.seed(
-        seed
-    )
-
-    np.random.seed(
-        seed
-    )
-
-    torch.manual_seed(
-        seed
-    )
-
-    torch.cuda.manual_seed_all(
-        seed
-    )
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def setup_logging(
@@ -268,12 +269,8 @@ def save_checkpoint(
             "epoch": epoch,
             "global_step": global_step,
             "model": model.state_dict(),
-            "optimizer": (
-                optimizer.state_dict()
-            ),
-            "scheduler": (
-                scheduler.state_dict()
-            ),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
             "args": vars(args),
         },
@@ -355,6 +352,7 @@ def prepare_metrics_file(
                 "train_loss",
                 "train_loss_main",
                 "train_loss_aux",
+                "train_loss_region",
                 "train_loss_edge",
                 "learning_rate",
                 "train_time_seconds",
@@ -393,6 +391,10 @@ def append_metrics(
                 ),
                 train_statistics.get(
                     "loss_aux",
+                    "",
+                ),
+                train_statistics.get(
+                    "loss_region",
                     "",
                 ),
                 train_statistics.get(
@@ -510,8 +512,10 @@ def main() -> None:
     logger.info(
         "Loss weights | "
         "Aux: %.3f | "
+        "Region: %.3f | "
         "Edge: %.3f",
         args.aux_weight,
+        args.region_weight,
         args.edge_weight,
     )
 
@@ -548,9 +552,31 @@ def main() -> None:
         )
     )
 
-    mean_hierarchies = (
+    model_mean_hierarchies = (
         get_model_mean_hierarchies(
             model
+        )
+    )
+
+    mean_hierarchy_set = set(
+        model_mean_hierarchies
+    )
+
+    region_target_key = None
+
+    if args.region_weight > 0.0:
+        region_target_key = (
+            f"mean_"
+            f"{args.region_hierarchy}"
+        )
+
+        mean_hierarchy_set.add(
+            args.region_hierarchy
+        )
+
+    mean_hierarchies = tuple(
+        sorted(
+            mean_hierarchy_set
         )
     )
 
@@ -562,13 +588,29 @@ def main() -> None:
         else None
     )
 
-    train_mean_dir = (
-        args.train_mean
-        if model_uses_mean(
+    mean_required = (
+        model_uses_mean(
             model
         )
+        or region_target_key
+        is not None
+    )
+
+    train_mean_dir = (
+        args.train_mean
+        if mean_required
         else None
     )
+
+    if (
+        mean_required
+        and train_mean_dir is None
+    ):
+        raise ValueError(
+            "--train-mean is required when "
+            "the model uses mean maps or "
+            "region loss is enabled."
+        )
 
     logger.info(
         "Model inputs: %s",
@@ -607,6 +649,12 @@ def main() -> None:
                 for hierarchy
                 in mean_hierarchies
             ),
+        )
+
+    if region_target_key is not None:
+        logger.info(
+            "Region loss target: %s",
+            region_target_key,
         )
 
     network_source_path = Path(
@@ -677,6 +725,9 @@ def main() -> None:
         ),
         edge_weight=(
             args.edge_weight
+        ),
+        region_weight=(
+            args.region_weight
         ),
     )
 
@@ -783,6 +834,9 @@ def main() -> None:
             log_interval=(
                 args.log_interval
             ),
+            region_target_key=(
+                region_target_key
+            ),
         )
 
         append_metrics(
@@ -799,6 +853,7 @@ def main() -> None:
             "Train loss %.6f | "
             "Main %.6f | "
             "Aux %.6f | "
+            "Region %.6f | "
             "Edge %.6f | "
             "LR %.8f | "
             "Train %.1fs",
@@ -812,6 +867,10 @@ def main() -> None:
             ),
             train_statistics.get(
                 "loss_aux",
+                0.0,
+            ),
+            train_statistics.get(
+                "loss_region",
                 0.0,
             ),
             train_statistics.get(

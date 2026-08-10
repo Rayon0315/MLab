@@ -38,7 +38,9 @@ def get_edge_target_key(
     return max(
         nam_keys,
         key=lambda key: int(
-            key.removeprefix("nam_")
+            key.removeprefix(
+                "nam_"
+            )
         ),
     )
 
@@ -228,6 +230,7 @@ def train_one_epoch(
     global_step: int,
     use_amp: bool,
     log_interval: int,
+    region_target_key: str | None = None,
 ) -> tuple[
     dict[str, float],
     int,
@@ -277,6 +280,12 @@ def train_one_epoch(
         MAX_GRAD_NORM,
     )
 
+    if region_target_key is not None:
+        logger.info(
+            "Region loss target: %s",
+            region_target_key,
+        )
+
     total_samples = 0
 
     loss_sums: dict[
@@ -314,6 +323,23 @@ def train_one_epoch(
                 edge_target_key
             ]
 
+        region_target = None
+
+        if region_target_key is not None:
+            if region_target_key not in batch:
+                raise KeyError(
+                    "Batch does not contain "
+                    "region loss target: "
+                    f"{region_target_key}"
+                )
+
+            region_target = batch[
+                region_target_key
+            ].to(
+                device,
+                non_blocking=True,
+            )
+
         optimizer.zero_grad(
             set_to_none=True
         )
@@ -337,6 +363,7 @@ def train_one_epoch(
                 outputs,
                 mask,
                 nam_target=nam_target,
+                region_target=region_target,
             )
 
             loss = loss_dict[
@@ -456,6 +483,7 @@ def train_one_epoch(
                 "Loss %.6f | "
                 "Main %.6f | "
                 "Aux %.6f | "
+                "Region %.6f | "
                 "Edge %.6f | "
                 "Grad %.4f",
                 epoch,
@@ -480,6 +508,15 @@ def train_one_epoch(
                 (
                     loss_dict.get(
                         "loss_aux",
+                        zero,
+                    )
+                    .detach()
+                    .float()
+                    .item()
+                ),
+                (
+                    loss_dict.get(
+                        "loss_region",
                         zero,
                     )
                     .detach()

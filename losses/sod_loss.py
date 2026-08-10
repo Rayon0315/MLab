@@ -14,13 +14,19 @@ class SODLoss(nn.Module):
         self,
         aux_weight: float = 0.4,
         edge_weight: float = 0.1,
+        region_weight: float = 0.0,
         smooth: float = 1.0,
+        region_color_epsilon: float = 1e-4,
     ) -> None:
         super().__init__()
 
         self.aux_weight = aux_weight
         self.edge_weight = edge_weight
+        self.region_weight = region_weight
         self.smooth = smooth
+        self.region_color_epsilon = (
+            region_color_epsilon
+        )
 
         self.bce = nn.BCEWithLogitsLoss()
 
@@ -59,6 +65,7 @@ class SODLoss(nn.Module):
         outputs: dict[str, Any],
         target: Tensor,
         nam_target: Tensor | None = None,
+        region_target: Tensor | None = None,
     ) -> dict[str, Tensor]:
         pred = outputs["pred"]
 
@@ -120,6 +127,27 @@ class SODLoss(nn.Module):
                 "loss_aux"
             ] = auxiliary_loss
 
+        if (
+            region_target is not None
+            and self.region_weight > 0.0
+        ):
+            region_loss = (
+                self._region_consistency_loss(
+                    logits=pred,
+                    region_map=region_target,
+                )
+            )
+
+            total_loss = (
+                total_loss
+                + self.region_weight
+                * region_loss
+            )
+
+            loss_dict[
+                "loss_region"
+            ] = region_loss
+
         edge_prediction = outputs.get(
             "edge"
         )
@@ -169,7 +197,9 @@ class SODLoss(nn.Module):
 
             if nam_target is not None:
                 nam_target_float = (
-                    nam_target.detach().float()
+                    nam_target
+                    .detach()
+                    .float()
                 )
 
                 nam_target_float = (
@@ -181,7 +211,8 @@ class SODLoss(nn.Module):
                 )
 
                 nam_target_float = (
-                    nam_target_float > 0.5
+                    nam_target_float
+                    > 0.5
                 ).float()
 
                 nam_edge_loss = (
@@ -214,7 +245,9 @@ class SODLoss(nn.Module):
                 "loss_edge"
             ] = edge_loss
 
-        loss_dict["loss"] = total_loss
+        loss_dict[
+            "loss"
+        ] = total_loss
 
         return loss_dict
 
@@ -223,14 +256,18 @@ class SODLoss(nn.Module):
         logits: Tensor,
         target: Tensor,
     ) -> Tensor:
-        binary_cross_entropy = self.bce(
-            logits,
-            target,
+        binary_cross_entropy = (
+            self.bce(
+                logits,
+                target,
+            )
         )
 
-        soft_iou = self._soft_iou_loss(
-            logits=logits,
-            target=target,
+        soft_iou = (
+            self._soft_iou_loss(
+                logits=logits,
+                target=target,
+            )
         )
 
         return (
@@ -249,8 +286,10 @@ class SODLoss(nn.Module):
             start_dim=1
         )
 
-        flattened_target = target.flatten(
-            start_dim=1
+        flattened_target = (
+            target.flatten(
+                start_dim=1
+            )
         )
 
         intersection = (
@@ -261,8 +300,12 @@ class SODLoss(nn.Module):
         )
 
         union = (
-            probability.sum(dim=1)
-            + flattened_target.sum(dim=1)
+            probability.sum(
+                dim=1
+            )
+            + flattened_target.sum(
+                dim=1
+            )
             - intersection
         )
 
@@ -277,6 +320,136 @@ class SODLoss(nn.Module):
         return (
             1.0
             - iou.mean()
+        )
+
+    def _region_consistency_loss(
+        self,
+        logits: Tensor,
+        region_map: Tensor,
+    ) -> Tensor:
+        logits = logits.float()
+
+        region_map = (
+            region_map
+            .detach()
+            .float()
+        )
+
+        if (
+            region_map.shape[-2:]
+            != logits.shape[-2:]
+        ):
+            region_map = (
+                F.interpolate(
+                    region_map,
+                    size=logits.shape[-2:],
+                    mode="nearest",
+                )
+            )
+
+        probability = torch.sigmoid(
+            logits
+        )
+
+        horizontal_region_difference = (
+            region_map[
+                :,
+                :,
+                :,
+                1:,
+            ]
+            - region_map[
+                :,
+                :,
+                :,
+                :-1,
+            ]
+        ).abs()
+
+        horizontal_same_region = (
+            horizontal_region_difference
+            .amax(
+                dim=1,
+                keepdim=True,
+            )
+            <= self.region_color_epsilon
+        ).float()
+
+        horizontal_prediction_difference = (
+            probability[
+                :,
+                :,
+                :,
+                1:,
+            ]
+            - probability[
+                :,
+                :,
+                :,
+                :-1,
+            ]
+        ).abs()
+
+        vertical_region_difference = (
+            region_map[
+                :,
+                :,
+                1:,
+                :,
+            ]
+            - region_map[
+                :,
+                :,
+                :-1,
+                :,
+            ]
+        ).abs()
+
+        vertical_same_region = (
+            vertical_region_difference
+            .amax(
+                dim=1,
+                keepdim=True,
+            )
+            <= self.region_color_epsilon
+        ).float()
+
+        vertical_prediction_difference = (
+            probability[
+                :,
+                :,
+                1:,
+                :,
+            ]
+            - probability[
+                :,
+                :,
+                :-1,
+                :,
+            ]
+        ).abs()
+
+        numerator = (
+            (
+                horizontal_prediction_difference
+                * horizontal_same_region
+            ).sum()
+            + (
+                vertical_prediction_difference
+                * vertical_same_region
+            ).sum()
+        )
+
+        denominator = (
+            horizontal_same_region.sum()
+            + vertical_same_region.sum()
+        ).clamp_min(
+            1.0
+        )
+
+        return (
+            numerator
+            / denominator
         )
 
     def _structure_loss(
@@ -430,7 +603,9 @@ class SODLoss(nn.Module):
             enabled=False,
         ):
             binary_target = (
-                target.detach().float()
+                target
+                .detach()
+                .float()
                 > 0.5
             ).float()
 

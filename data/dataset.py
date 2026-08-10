@@ -20,12 +20,16 @@ class SODSample(TypedDict):
     nam_40: NotRequired[Tensor]
     nam_60: NotRequired[Tensor]
 
+    mean_20: NotRequired[Tensor]
+    mean_40: NotRequired[Tensor]
+    mean_60: NotRequired[Tensor]
+
     name: str
     original_size: Tensor
 
 
 class SODDataset(Dataset):
-    """RGB SOD dataset with optional NAMLab maps."""
+    """RGB SOD dataset with optional NAMLab maps and region-mean maps."""
 
     IMAGE_SUFFIXES = {
         ".jpg",
@@ -57,21 +61,39 @@ class SODDataset(Dataset):
         mask_dir: str | Path,
         nam_dir: str | Path | None = None,
         nam_hierarchies: tuple[int, ...] = (),
+        mean_dir: str | Path | None = None,
+        mean_hierarchies: tuple[int, ...] = (),
         image_size: tuple[int, int] = (352, 352),
         augment_8way: bool = False,
     ) -> None:
         self.image_dir = Path(image_dir)
         self.mask_dir = Path(mask_dir)
+
         self.nam_dir = (
             Path(nam_dir)
             if nam_dir is not None
             else None
         )
 
+        self.mean_dir = (
+            Path(mean_dir)
+            if mean_dir is not None
+            else None
+        )
+
         self.image_size = image_size
         self.augment_8way = augment_8way
+
         self.nam_hierarchies = tuple(
-            sorted(set(nam_hierarchies))
+            sorted(
+                set(nam_hierarchies)
+            )
+        )
+
+        self.mean_hierarchies = tuple(
+            sorted(
+                set(mean_hierarchies)
+            )
         )
 
         self.image_map = self._collect_file_map(
@@ -130,10 +152,37 @@ class SODDataset(Dataset):
                     ),
                     allowed_suffixes=self.MASK_SUFFIXES,
                 )
-                for hierarchy in self.nam_hierarchies
+                for hierarchy
+                in self.nam_hierarchies
             }
 
             self._validate_nam_maps()
+
+        self.mean_maps: dict[
+            int,
+            dict[str, Path],
+        ] = {}
+
+        if self.mean_hierarchies:
+            if self.mean_dir is None:
+                raise ValueError(
+                    "Region-mean hierarchies were requested, "
+                    "but mean_dir is None."
+                )
+
+            self.mean_maps = {
+                hierarchy: self._collect_file_map(
+                    directory=(
+                        self.mean_dir
+                        / f"region_mean_{hierarchy}"
+                    ),
+                    allowed_suffixes=self.IMAGE_SUFFIXES,
+                )
+                for hierarchy
+                in self.mean_hierarchies
+            }
+
+            self._validate_mean_maps()
 
     def __len__(self) -> int:
         multiplier = (
@@ -142,7 +191,10 @@ class SODDataset(Dataset):
             else 1
         )
 
-        return len(self.names) * multiplier
+        return (
+            len(self.names)
+            * multiplier
+        )
 
     def __getitem__(
         self,
@@ -157,7 +209,9 @@ class SODDataset(Dataset):
             base_index = index
             transform_index = 0
 
-        name = self.names[base_index]
+        name = self.names[
+            base_index
+        ]
 
         image = self._read_rgb_image(
             self.image_map[name]
@@ -244,6 +298,31 @@ class SODDataset(Dataset):
                 nam_map
             )
 
+        for hierarchy in self.mean_hierarchies:
+            mean_map = self._read_rgb_image(
+                self.mean_maps[
+                    hierarchy
+                ][name]
+            )
+
+            mean_map = (
+                self._apply_geometric_transform(
+                    mean_map,
+                    transform_index,
+                )
+            )
+
+            mean_map = mean_map.resize(
+                target_size,
+                resample=Image.Resampling.NEAREST,
+            )
+
+            sample[
+                f"mean_{hierarchy}"
+            ] = self._rgb_to_tensor(
+                mean_map
+            )
+
         return sample
 
     def _validate_nam_maps(
@@ -274,6 +353,36 @@ class SODDataset(Dataset):
                 f"directory="
                 f"{self.nam_dir}/"
                 f"hier_{hierarchy}"
+            )
+
+    def _validate_mean_maps(
+        self,
+    ) -> None:
+        for hierarchy in self.mean_hierarchies:
+            missing_names = sorted(
+                set(self.names)
+                - set(
+                    self.mean_maps[
+                        hierarchy
+                    ]
+                )
+            )
+
+            if not missing_names:
+                continue
+
+            preview = ", ".join(
+                missing_names[:20]
+            )
+
+            raise FileNotFoundError(
+                "Missing region-mean maps | "
+                f"hierarchy={hierarchy} | "
+                f"count={len(missing_names)} | "
+                f"samples={preview} | "
+                f"directory="
+                f"{self.mean_dir}/"
+                f"region_mean_{hierarchy}"
             )
 
     @staticmethod
@@ -407,6 +516,28 @@ class SODDataset(Dataset):
             image_tensor
             - cls.IMAGE_MEAN
         ) / cls.IMAGE_STD
+
+    @staticmethod
+    def _rgb_to_tensor(
+        image: Image.Image,
+    ) -> Tensor:
+        image_array = np.array(
+            image,
+            dtype=np.float32,
+            copy=True,
+        )
+
+        image_tensor = (
+            torch.from_numpy(
+                image_array
+            )
+            .permute(2, 0, 1)
+            .contiguous()
+        )
+
+        return (
+            image_tensor / 255.0
+        )
 
     @staticmethod
     def _binary_to_tensor(

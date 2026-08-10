@@ -23,7 +23,9 @@ from tqdm import tqdm
 from data.dataset import SODDataset
 from engine.model_inputs import (
     get_model_input_keys,
+    get_model_mean_hierarchies,
     get_model_nam_hierarchies,
+    model_uses_mean,
     model_uses_nam,
     prepare_model_inputs,
 )
@@ -77,6 +79,11 @@ def parse_args() -> argparse.Namespace:
             "datasets/DUTS/DUTS-TE/"
             "nam"
         ),
+    )
+
+    parser.add_argument(
+        "--test-mean",
+        default=None,
     )
 
     parser.add_argument(
@@ -191,7 +198,10 @@ def build_model(
         )
     )
 
-    return network_module.build_model()
+    return (
+        network_module
+        .build_model()
+    )
 
 
 def load_checkpoint(
@@ -281,7 +291,10 @@ def run_inference(
     use_amp: bool,
     prediction_dir: Path,
     log_interval: int,
-) -> dict[str, float | int]:
+) -> dict[
+    str,
+    float | int,
+]:
     model.eval()
 
     sample_count = 0
@@ -349,37 +362,57 @@ def run_inference(
             original_height = int(
                 batch[
                     "original_size"
-                ][index, 0]
+                ][
+                    index,
+                    0,
+                ]
             )
 
             original_width = int(
                 batch[
                     "original_size"
-                ][index, 1]
+                ][
+                    index,
+                    1,
+                ]
             )
 
-            restored_logits = F.interpolate(
-                logits[
-                    index:index + 1
-                ].float(),
-                size=(
-                    original_height,
-                    original_width,
-                ),
-                mode="bilinear",
-                align_corners=False,
+            restored_logits = (
+                F.interpolate(
+                    logits[
+                        index:index + 1
+                    ].float(),
+                    size=(
+                        original_height,
+                        original_width,
+                    ),
+                    mode="bilinear",
+                    align_corners=False,
+                )
             )
 
-            prediction = torch.sigmoid(
-                restored_logits
+            prediction = (
+                torch.sigmoid(
+                    restored_logits
+                )
             )
 
             prediction_array = (
-                prediction[0, 0]
-                .clamp(0.0, 1.0)
-                .mul(255.0)
+                prediction[
+                    0,
+                    0,
+                ]
+                .clamp(
+                    0.0,
+                    1.0,
+                )
+                .mul(
+                    255.0
+                )
                 .round()
-                .to(torch.uint8)
+                .to(
+                    torch.uint8
+                )
                 .cpu()
                 .numpy()
             )
@@ -438,7 +471,8 @@ def get_device_name(
 ) -> str:
     if device.type == "cuda":
         return (
-            torch.cuda.get_device_name(
+            torch.cuda
+            .get_device_name(
                 device
             )
         )
@@ -455,7 +489,8 @@ def main() -> None:
 
     use_amp = (
         args.amp
-        and device.type == "cuda"
+        and device.type
+        == "cuda"
     )
 
     output_dir = Path(
@@ -473,7 +508,8 @@ def main() -> None:
     )
 
     setup_logging(
-        output_dir / "test.log"
+        output_dir
+        / "test.log"
     )
 
     logger = logging.getLogger(
@@ -557,9 +593,25 @@ def main() -> None:
             )
         )
 
+        mean_hierarchies = (
+            get_model_mean_hierarchies(
+                model
+            )
+        )
+
         test_nam_dir = (
             args.test_nam
-            if model_uses_nam(model)
+            if model_uses_nam(
+                model
+            )
+            else None
+        )
+
+        test_mean_dir = (
+            args.test_mean
+            if model_uses_mean(
+                model
+            )
             else None
         )
 
@@ -576,6 +628,7 @@ def main() -> None:
                 test_nam_dir,
             )
 
+        if nam_hierarchies:
             logger.info(
                 "NAM hierarchies: %s",
                 ", ".join(
@@ -585,10 +638,30 @@ def main() -> None:
                 ),
             )
 
+        if test_mean_dir is not None:
+            logger.info(
+                "Region-mean directory: %s",
+                test_mean_dir,
+            )
+
+        if mean_hierarchies:
+            logger.info(
+                "Region-mean hierarchies: %s",
+                ", ".join(
+                    str(hierarchy)
+                    for hierarchy
+                    in mean_hierarchies
+                ),
+            )
+
         checkpoint = load_checkpoint(
-            checkpoint_path=args.checkpoint,
+            checkpoint_path=(
+                args.checkpoint
+            ),
             model=model,
-            network_path=args.network,
+            network_path=(
+                args.network
+            ),
         )
 
         checkpoint_epoch = (
@@ -608,11 +681,23 @@ def main() -> None:
         model.eval()
 
         dataset = SODDataset(
-            image_dir=args.test_images,
-            mask_dir=args.test_masks,
-            nam_dir=test_nam_dir,
+            image_dir=(
+                args.test_images
+            ),
+            mask_dir=(
+                args.test_masks
+            ),
+            nam_dir=(
+                test_nam_dir
+            ),
             nam_hierarchies=(
                 nam_hierarchies
+            ),
+            mean_dir=(
+                test_mean_dir
+            ),
+            mean_hierarchies=(
+                mean_hierarchies
             ),
             image_size=(
                 args.image_size,
@@ -620,7 +705,10 @@ def main() -> None:
             ),
         )
 
-        if args.max_samples is not None:
+        if (
+            args.max_samples
+            is not None
+        ):
             dataset = Subset(
                 dataset,
                 range(
@@ -633,11 +721,16 @@ def main() -> None:
 
         data_loader = DataLoader(
             dataset,
-            batch_size=args.batch_size,
+            batch_size=(
+                args.batch_size
+            ),
             shuffle=False,
-            num_workers=args.num_workers,
+            num_workers=(
+                args.num_workers
+            ),
             pin_memory=(
-                device.type == "cuda"
+                device.type
+                == "cuda"
             ),
             persistent_workers=(
                 args.num_workers > 0
@@ -662,7 +755,9 @@ def main() -> None:
             data_loader=data_loader,
             device=device,
             use_amp=use_amp,
-            warmup_steps=args.warmup_steps,
+            warmup_steps=(
+                args.warmup_steps
+            ),
         )
 
         inference_statistics = (
@@ -671,8 +766,12 @@ def main() -> None:
                 data_loader=data_loader,
                 device=device,
                 use_amp=use_amp,
-                prediction_dir=prediction_dir,
-                log_interval=args.log_interval,
+                prediction_dir=(
+                    prediction_dir
+                ),
+                log_interval=(
+                    args.log_interval
+                ),
             )
         )
 
@@ -706,9 +805,15 @@ def main() -> None:
         metric_results,
         metric_curves,
         evaluated_samples,
-    ) = evaluate_prediction_directory(
-        prediction_dir=prediction_dir,
-        ground_truth_dir=args.test_masks,
+    ) = (
+        evaluate_prediction_directory(
+            prediction_dir=(
+                prediction_dir
+            ),
+            ground_truth_dir=(
+                args.test_masks
+            ),
+        )
     )
 
     evaluation_seconds = (
@@ -729,17 +834,27 @@ def main() -> None:
     )
 
     results = {
-        "dataset": args.dataset_name,
-        "network": args.network,
-        "checkpoint": args.checkpoint,
+        "dataset": (
+            args.dataset_name
+        ),
+        "network": (
+            args.network
+        ),
+        "checkpoint": (
+            args.checkpoint
+        ),
         "checkpoint_epoch": (
             checkpoint_epoch
         ),
         "checkpoint_best_metric": (
             checkpoint_best_metric
         ),
-        "samples": evaluated_samples,
-        "metrics": metric_results,
+        "samples": (
+            evaluated_samples
+        ),
+        "metrics": (
+            metric_results
+        ),
         "inference": (
             {
                 "input_size": (
@@ -748,7 +863,9 @@ def main() -> None:
                 "batch_size": (
                     args.batch_size
                 ),
-                "amp": use_amp,
+                "amp": (
+                    use_amp
+                ),
                 "device": str(
                     device
                 ),
@@ -811,8 +928,12 @@ def main() -> None:
         "MAE %.6f | "
         "S-measure %.6f | "
         "Weighted F-measure %.6f",
-        metric_results["mae"],
-        metric_results["smeasure"],
+        metric_results[
+            "mae"
+        ],
+        metric_results[
+            "smeasure"
+        ],
         metric_results[
             "weighted_fmeasure"
         ],

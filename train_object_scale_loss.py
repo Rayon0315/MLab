@@ -42,8 +42,8 @@ from train import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Train SOD with object-scale-balanced "
-            "foreground supervision."
+            "Train SOD with cosine-decayed "
+            "object-balanced foreground supervision."
         ),
     )
 
@@ -51,98 +51,81 @@ def parse_args() -> argparse.Namespace:
         "--network",
         required=True,
     )
-
     parser.add_argument(
         "--train-images",
         required=True,
     )
-
     parser.add_argument(
         "--train-masks",
         required=True,
     )
-
     parser.add_argument(
         "--train-instances",
         required=True,
     )
-
     parser.add_argument(
         "--train-nam",
         default=None,
     )
-
     parser.add_argument(
         "--train-mean",
         default=None,
     )
-
     parser.add_argument(
         "--image-size",
         type=int,
         default=352,
     )
-
     parser.add_argument(
         "--batch-size",
         type=int,
         default=8,
     )
-
     parser.add_argument(
         "--epochs",
         type=int,
         default=45,
     )
-
     parser.add_argument(
         "--num-workers",
         type=int,
         default=8,
     )
-
     parser.add_argument(
         "--lr",
         type=float,
         default=1e-4,
     )
-
     parser.add_argument(
         "--min-lr",
         type=float,
         default=1e-6,
     )
-
     parser.add_argument(
         "--weight-decay",
         type=float,
         default=1e-4,
     )
-
     parser.add_argument(
         "--aux-weight",
         type=float,
         default=0.4,
     )
-
     parser.add_argument(
         "--edge-weight",
         type=float,
         default=0.0,
     )
-
     parser.add_argument(
         "--object-weight",
         type=float,
         default=0.1,
     )
-
     parser.add_argument(
         "--augment-8way",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
-
     parser.add_argument(
         "--device",
         default=(
@@ -151,41 +134,34 @@ def parse_args() -> argparse.Namespace:
             else "cpu"
         ),
     )
-
     parser.add_argument(
         "--amp",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-
     parser.add_argument(
         "--run-dir",
         required=True,
     )
-
     parser.add_argument(
         "--save-every",
         type=int,
         default=5,
     )
-
     parser.add_argument(
         "--log-interval",
         type=int,
         default=100,
     )
-
     parser.add_argument(
         "--resume",
         default=None,
     )
-
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
     )
-
     parser.add_argument(
         "--max-train-samples",
         type=int,
@@ -217,6 +193,7 @@ def prepare_metrics_file(
                 "train_loss_main",
                 "train_loss_main_base",
                 "train_loss_object",
+                "object_weight",
                 "train_loss_aux",
                 "objects_per_image",
                 "mean_object_area_ratio",
@@ -243,7 +220,9 @@ def append_metrics(
             [
                 epoch,
                 global_step,
-                train_statistics["loss"],
+                train_statistics[
+                    "loss"
+                ],
                 train_statistics.get(
                     "loss_main",
                     "",
@@ -254,6 +233,10 @@ def append_metrics(
                 ),
                 train_statistics.get(
                     "loss_object",
+                    "",
+                ),
+                train_statistics.get(
+                    "stat_object_weight",
                     "",
                 ),
                 train_statistics.get(
@@ -268,7 +251,9 @@ def append_metrics(
                     "stat_object_area_ratio",
                     "",
                 ),
-                train_statistics["lr"],
+                train_statistics[
+                    "lr"
+                ],
                 train_statistics[
                     "time_seconds"
                 ],
@@ -297,30 +282,23 @@ def main() -> None:
     )
 
     checkpoint_dir = (
-        run_dir
-        / "checkpoints"
+        run_dir / "checkpoints"
     )
-
     log_dir = (
-        run_dir
-        / "logs"
+        run_dir / "logs"
     )
-
     source_dir = (
-        run_dir
-        / "network_source"
+        run_dir / "network_source"
     )
 
     checkpoint_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
-
     log_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
-
     source_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -328,12 +306,10 @@ def main() -> None:
 
     setup_logging(
         log_path=(
-            log_dir
-            / "train.log"
+            log_dir / "train.log"
         ),
         resume=(
-            args.resume
-            is not None
+            args.resume is not None
         ),
     )
 
@@ -345,35 +321,30 @@ def main() -> None:
         "Run directory: %s",
         run_dir,
     )
-
     logger.info(
         "Device: %s",
         device,
     )
-
     logger.info(
         "AMP: %s",
         use_amp,
     )
-
     logger.info(
         "Network: %s",
         args.network,
     )
-
     logger.info(
         "Object-scale supervision | "
-        "Weight: %.3f | "
+        "Initial weight: %.3f | "
+        "Schedule: cosine -> 0 | "
         "Instance maps: %s",
         args.object_weight,
         args.train_instances,
     )
-
     logger.info(
         "8-way augmentation: %s",
         args.augment_8way,
     )
-
     logger.info(
         "LR schedule: cosine | "
         "Initial LR: %.8f | "
@@ -383,8 +354,7 @@ def main() -> None:
     )
 
     with (
-        run_dir
-        / "args.json"
+        run_dir / "args.json"
     ).open(
         "w",
         encoding="utf-8",
@@ -408,13 +378,11 @@ def main() -> None:
             model
         )
     )
-
     nam_hierarchies = (
         get_model_nam_hierarchies(
             model
         )
     )
-
     mean_hierarchies = (
         get_model_mean_hierarchies(
             model
@@ -453,22 +421,6 @@ def main() -> None:
         ),
     )
 
-    if train_nam_dir is not None:
-        logger.info(
-            "NAM directory: %s",
-            train_nam_dir,
-        )
-
-    if nam_hierarchies:
-        logger.info(
-            "NAM hierarchies: %s",
-            ", ".join(
-                str(hierarchy)
-                for hierarchy
-                in nam_hierarchies
-            ),
-        )
-
     if train_mean_dir is not None:
         logger.info(
             "Region-mean directory: %s",
@@ -495,44 +447,30 @@ def main() -> None:
         / network_source_path.name,
     )
 
-    current_train_source = Path(
-        __file__
-    )
-
     shutil.copy2(
-        current_train_source,
+        Path(__file__),
         source_dir
-        / current_train_source.name,
+        / Path(__file__).name,
     )
 
     loss_module = __import__(
         "losses.object_scale_loss",
         fromlist=["dummy"],
     )
-
-    loss_source = Path(
-        loss_module.__file__
-    )
-
     shutil.copy2(
-        loss_source,
+        Path(loss_module.__file__),
         source_dir
-        / loss_source.name,
+        / Path(loss_module.__file__).name,
     )
 
     dataset_module = __import__(
         "data.object_scale_dataset",
         fromlist=["dummy"],
     )
-
-    dataset_source = Path(
-        dataset_module.__file__
-    )
-
     shutil.copy2(
-        dataset_source,
+        Path(dataset_module.__file__),
         source_dir
-        / dataset_source.name,
+        / Path(dataset_module.__file__).name,
     )
 
     model = model.to(
@@ -541,12 +479,8 @@ def main() -> None:
 
     train_dataset = (
         ObjectScaleSODDataset(
-            image_dir=(
-                args.train_images
-            ),
-            mask_dir=(
-                args.train_masks
-            ),
+            image_dir=args.train_images,
+            mask_dir=args.train_masks,
             instance_dir=(
                 args.train_instances
             ),
@@ -588,26 +522,19 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=(
-            device.type
-            == "cuda"
+            device.type == "cuda"
         ),
         persistent_workers=(
             args.num_workers > 0
         ),
     )
 
-    criterion = (
-        ObjectBalancedSODLoss(
-            aux_weight=(
-                args.aux_weight
-            ),
-            edge_weight=(
-                args.edge_weight
-            ),
-            object_weight=(
-                args.object_weight
-            ),
-        )
+    criterion = ObjectBalancedSODLoss(
+        aux_weight=args.aux_weight,
+        edge_weight=args.edge_weight,
+        object_weight=(
+            args.object_weight
+        ),
     )
 
     optimizer = AdamW(
@@ -618,12 +545,10 @@ def main() -> None:
         ),
     )
 
-    scheduler = (
-        CosineAnnealingLR(
-            optimizer,
-            T_max=args.epochs,
-            eta_min=args.min_lr,
-        )
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=args.min_lr,
     )
 
     scaler = torch.amp.GradScaler(
@@ -662,15 +587,13 @@ def main() -> None:
         )
 
     metrics_path = (
-        log_dir
-        / "metrics.csv"
+        log_dir / "metrics.csv"
     )
 
     prepare_metrics_file(
         path=metrics_path,
         resume=(
-            args.resume
-            is not None
+            args.resume is not None
         ),
     )
 
@@ -678,12 +601,10 @@ def main() -> None:
         "Training samples: %d",
         len(train_dataset),
     )
-
     logger.info(
         "Batches per epoch: %d",
         len(train_loader),
     )
-
     logger.info(
         "Total epochs: %d",
         args.epochs,
@@ -693,6 +614,17 @@ def main() -> None:
         start_epoch,
         args.epochs + 1,
     ):
+        criterion.set_epoch(
+            epoch=epoch,
+            total_epochs=args.epochs,
+        )
+
+        logger.info(
+            "Epoch %03d object weight: %.6f",
+            epoch,
+            criterion.current_object_weight,
+        )
+
         (
             train_statistics,
             global_step,
@@ -726,6 +658,7 @@ def main() -> None:
             "Main %.6f | "
             "BaseMain %.6f | "
             "Object %.6f | "
+            "ObjW %.6f | "
             "Aux %.6f | "
             "Objects/Image %.3f | "
             "MeanObjArea %.5f | "
@@ -745,6 +678,10 @@ def main() -> None:
             ),
             train_statistics.get(
                 "loss_object",
+                0.0,
+            ),
+            train_statistics.get(
+                "stat_object_weight",
                 0.0,
             ),
             train_statistics.get(

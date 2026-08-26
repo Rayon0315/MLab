@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import torch
@@ -13,21 +14,21 @@ from losses.sod_loss import SODLoss
 
 class ObjectBalancedSODLoss(SODLoss):
     """
-    Standard SOD loss + object-balanced foreground supervision.
+    Standard SOD loss + cosine-decayed object-balanced foreground supervision.
 
     Final prediction:
-        BCE + soft IoU + lambda_obj * object-balanced loss
+        BCE + soft IoU + lambda_obj(epoch) * object-balanced loss
 
     Auxiliary predictions:
         BCE + soft IoU
 
-    For the extra term:
-        - positive BCE is averaged inside each salient component;
-        - components are averaged inside each image;
-        - images are averaged inside the batch.
+    Object-balanced term:
+        1. Average positive BCE inside each connected salient object.
+        2. Average objects inside each image.
+        3. Average images inside the batch.
 
-    Therefore object size no longer determines the contribution of
-    a salient instance to this auxiliary term.
+    lambda_obj uses cosine decay from object_weight at epoch 1
+    to 0 at the final epoch.
     """
 
     def __init__(
@@ -44,8 +45,44 @@ class ObjectBalancedSODLoss(SODLoss):
             smooth=smooth,
         )
 
-        self.object_weight = (
+        self.object_weight = float(
             object_weight
+        )
+        self.current_object_weight = float(
+            object_weight
+        )
+
+    def set_epoch(
+        self,
+        epoch: int,
+        total_epochs: int,
+    ) -> None:
+        if total_epochs <= 1:
+            progress = 1.0
+        else:
+            progress = (
+                (epoch - 1)
+                / (total_epochs - 1)
+            )
+
+        progress = min(
+            max(progress, 0.0),
+            1.0,
+        )
+
+        cosine_factor = (
+            0.5
+            * (
+                1.0
+                + math.cos(
+                    math.pi * progress
+                )
+            )
+        )
+
+        self.current_object_weight = (
+            self.object_weight
+            * cosine_factor
         )
 
     def forward(
@@ -69,9 +106,7 @@ class ObjectBalancedSODLoss(SODLoss):
         )
 
         base_main_loss = (
-            loss_dict[
-                "loss_main"
-            ]
+            loss_dict["loss_main"]
         )
 
         (
@@ -80,13 +115,11 @@ class ObjectBalancedSODLoss(SODLoss):
             mean_object_area_ratio,
         ) = self._object_balanced_loss(
             logits=outputs["pred"],
-            object_labels=(
-                object_labels
-            ),
+            object_labels=object_labels,
         )
 
         weighted_object_loss = (
-            self.object_weight
+            self.current_object_weight
             * object_loss
         )
 
@@ -97,6 +130,12 @@ class ObjectBalancedSODLoss(SODLoss):
         loss_dict[
             "loss_object"
         ] = object_loss
+
+        loss_dict[
+            "stat_object_weight"
+        ] = object_loss.new_tensor(
+            self.current_object_weight
+        ).detach()
 
         loss_dict[
             "stat_objects_per_image"
@@ -143,13 +182,11 @@ class ObjectBalancedSODLoss(SODLoss):
             labels.shape[-2:]
             != logits.shape[-2:]
         ):
-            labels = (
-                F.interpolate(
-                    labels.float(),
-                    size=logits.shape[-2:],
-                    mode="nearest",
-                ).long()
-            )
+            labels = F.interpolate(
+                labels.float(),
+                size=logits.shape[-2:],
+                mode="nearest",
+            ).long()
 
         labels = labels.squeeze(1)
 
@@ -157,9 +194,7 @@ class ObjectBalancedSODLoss(SODLoss):
             -logits.squeeze(1)
         )
 
-        batch_size = (
-            labels.shape[0]
-        )
+        batch_size = labels.shape[0]
 
         max_label = int(
             labels.max()
@@ -168,10 +203,7 @@ class ObjectBalancedSODLoss(SODLoss):
         )
 
         if max_label == 0:
-            zero = (
-                logits.sum()
-                * 0.0
-            )
+            zero = logits.sum() * 0.0
 
             return (
                 zero,
@@ -179,10 +211,7 @@ class ObjectBalancedSODLoss(SODLoss):
                 zero.detach(),
             )
 
-        stride = (
-            max_label
-            + 1
-        )
+        stride = max_label + 1
 
         image_offsets = (
             torch.arange(
@@ -198,8 +227,7 @@ class ObjectBalancedSODLoss(SODLoss):
         )
 
         global_labels = (
-            labels
-            + image_offsets
+            labels + image_offsets
         )
 
         foreground_mask = (
@@ -219,24 +247,19 @@ class ObjectBalancedSODLoss(SODLoss):
         )
 
         slot_count = (
-            batch_size
-            * stride
+            batch_size * stride
         )
 
-        component_loss_sum = (
-            torch.zeros(
-                slot_count,
-                device=logits.device,
-                dtype=logits.dtype,
-            )
+        component_loss_sum = torch.zeros(
+            slot_count,
+            device=logits.device,
+            dtype=logits.dtype,
         )
 
-        component_pixel_count = (
-            torch.zeros(
-                slot_count,
-                device=logits.device,
-                dtype=logits.dtype,
-            )
+        component_pixel_count = torch.zeros(
+            slot_count,
+            device=logits.device,
+            dtype=logits.dtype,
         )
 
         component_loss_sum.scatter_add_(
@@ -257,13 +280,10 @@ class ObjectBalancedSODLoss(SODLoss):
             component_pixel_count > 0
         )
 
-        valid_component_ids = (
-            torch.nonzero(
-                valid_components,
-                as_tuple=False,
-            )
-            .squeeze(1)
-        )
+        valid_component_ids = torch.nonzero(
+            valid_components,
+            as_tuple=False,
+        ).squeeze(1)
 
         component_losses = (
             component_loss_sum[
@@ -274,28 +294,22 @@ class ObjectBalancedSODLoss(SODLoss):
             ]
         )
 
-        component_image_ids = (
-            torch.div(
-                valid_component_ids,
-                stride,
-                rounding_mode="floor",
-            )
+        component_image_ids = torch.div(
+            valid_component_ids,
+            stride,
+            rounding_mode="floor",
         )
 
-        image_loss_sum = (
-            torch.zeros(
-                batch_size,
-                device=logits.device,
-                dtype=logits.dtype,
-            )
+        image_loss_sum = torch.zeros(
+            batch_size,
+            device=logits.device,
+            dtype=logits.dtype,
         )
 
-        image_object_count = (
-            torch.zeros(
-                batch_size,
-                device=logits.device,
-                dtype=logits.dtype,
-            )
+        image_object_count = torch.zeros(
+            batch_size,
+            device=logits.device,
+            dtype=logits.dtype,
         )
 
         image_loss_sum.scatter_add_(
@@ -330,7 +344,8 @@ class ObjectBalancedSODLoss(SODLoss):
         )
 
         objects_per_image = (
-            image_object_count.mean()
+            image_object_count
+            .mean()
             .detach()
         )
 
@@ -340,14 +355,11 @@ class ObjectBalancedSODLoss(SODLoss):
         )
 
         mean_object_area_ratio = (
-            (
-                component_pixel_count[
-                    valid_components
-                ].mean()
-                / image_area
-            )
-            .detach()
-        )
+            component_pixel_count[
+                valid_components
+            ].mean()
+            / image_area
+        ).detach()
 
         return (
             object_loss,

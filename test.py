@@ -29,6 +29,7 @@ from engine.model_inputs import (
     model_uses_nam,
     prepare_model_inputs,
 )
+from engine.trainer import get_amp_dtype
 from metrics.sod_metrics import (
     evaluate_prediction_directory,
     get_metric_library_version,
@@ -243,6 +244,19 @@ def synchronize(
         )
 
 
+def get_precision_name(
+    amp_dtype: torch.dtype | None,
+) -> str:
+    if amp_dtype is None:
+        return "float32"
+
+    return str(
+        amp_dtype
+    ).removeprefix(
+        "torch."
+    )
+
+
 @torch.inference_mode()
 def warm_up(
     model: nn.Module,
@@ -266,13 +280,24 @@ def warm_up(
         )
     )
 
+    amp_dtype = get_amp_dtype(
+        device=device,
+        use_amp=use_amp,
+    )
+
     for _ in range(
         warmup_steps
     ):
         with torch.autocast(
             device_type=device.type,
-            dtype=torch.float16,
-            enabled=use_amp,
+            dtype=(
+                amp_dtype
+                if amp_dtype is not None
+                else torch.float32
+            ),
+            enabled=(
+                amp_dtype is not None
+            ),
         ):
             model(
                 **model_inputs
@@ -296,6 +321,11 @@ def run_inference(
     float | int,
 ]:
     model.eval()
+
+    amp_dtype = get_amp_dtype(
+        device=device,
+        use_amp=use_amp,
+    )
 
     sample_count = 0
     forward_seconds = 0.0
@@ -332,8 +362,14 @@ def run_inference(
 
         with torch.autocast(
             device_type=device.type,
-            dtype=torch.float16,
-            enabled=use_amp,
+            dtype=(
+                amp_dtype
+                if amp_dtype is not None
+                else torch.float32
+            ),
+            enabled=(
+                amp_dtype is not None
+            ),
         ):
             outputs = model(
                 **model_inputs
@@ -493,6 +529,15 @@ def main() -> None:
         == "cuda"
     )
 
+    amp_dtype = get_amp_dtype(
+        device=device,
+        use_amp=use_amp,
+    )
+
+    precision_name = get_precision_name(
+        amp_dtype
+    )
+
     output_dir = Path(
         args.output_dir
     )
@@ -550,6 +595,11 @@ def main() -> None:
     logger.info(
         "AMP: %s",
         use_amp,
+    )
+
+    logger.info(
+        "Inference precision: %s",
+        precision_name,
     )
 
     checkpoint_epoch = None
@@ -865,6 +915,9 @@ def main() -> None:
                 ),
                 "amp": (
                     use_amp
+                ),
+                "precision": (
+                    precision_name
                 ),
                 "device": str(
                     device

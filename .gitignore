@@ -234,3 +234,6 @@ profile/
 !.github/
 !.github/**
 !.env.example
+
+# Local Scripts
+scripts/local

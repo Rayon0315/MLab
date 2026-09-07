@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# scripts/train_vmamba_progressive_region_direct_hier60_region_hybrid_eorssd.sh
+# scripts/train_vmamba_progressive_region_direct_hier60_region_hybrid_dictionary_routing_eorssd.sh
 
 set -e
 
 unset OMP_NUM_THREADS
 
-PROJECT_ROOT="${PROJECT_ROOT:-/home/MLab}"
-DATA_ROOT="${DATA_ROOT:-$HOME/autodl-tmp/datasets}"
-GPU_ID="${GPU_ID:-0}"
+PROJECT_ROOT="/home/MLab"
+DATA_ROOT="/root/autodl-tmp/datasets"
 
 cd "$PROJECT_ROOT"
 
-CUDA_VISIBLE_DEVICES="$GPU_ID" python train.py \
-    --network models.networks.vmamba_small_progressive_region_direct_hier60_region_hybrid_sod \
+python train.py \
+    --network models.networks.vmamba_small_progressive_region_direct_hier60_region_hybrid_dictionary_routing_sod \
     --train-images "$DATA_ROOT/EORSSD/train-images" \
     --train-masks "$DATA_ROOT/EORSSD/train-labels" \
     --train-mean "$DATA_ROOT/EORSSD/train-mean" \
@@ -30,4 +29,4 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" python train.py \
     --seed 42 \
     --save-every 5 \
     --log-interval 100 \
-    --run-dir runs/vmamba_progressive_region_direct_hier60_region_hybrid_eorssd_aug8_e45
+    --run-dir runs/vmamba_progressive_region_direct_hier60_region_hybrid_dictionary_routing_eorssd_aug8_e45

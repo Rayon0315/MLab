@@ -6,7 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
-import train_plateau as base_train
+import train_plateau_v2 as base_train
 
 from losses.asymmetric_evidence_loss import (
     AsymmetricEvidenceSODLoss,

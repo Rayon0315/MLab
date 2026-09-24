@@ -9,7 +9,6 @@ from pathlib import Path
 
 import torch
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Subset
 
 import train as original_train
@@ -17,7 +16,7 @@ import train as original_train
 
 _ORIGINAL_PARSE_ARGS = original_train.parse_args
 
-# Keep these names patchable so train_asymmetric_evidence_plateau.py can
+# Keep these names patchable so train_asymmetric_evidence_plateau_v2.py can
 # replace only the loss / metric functions exactly like the current
 # train_asymmetric_evidence.py does.
 SODLoss = original_train.SODLoss
@@ -35,18 +34,29 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=40,
         help=(
-            "Do not early-stop before this epoch. "
-            "--epochs remains the hard maximum epoch."
+            "Training may reduce LR before this point, "
+            "but it will not stop before this epoch."
         ),
     )
 
     parser.add_argument(
-        "--lr-patience",
+        "--plateau-patience",
         type=int,
-        default=5,
+        default=2,
         help=(
-            "Number of plateau epochs tolerated before "
-            "ReduceLROnPlateau lowers the learning rate."
+            "Number of consecutive epochs whose relative loss "
+            "improvement is below the threshold before reducing LR. "
+            "At min LR, the same condition stops training."
+        ),
+    )
+
+    parser.add_argument(
+        "--relative-threshold",
+        type=float,
+        default=0.001,
+        help=(
+            "Minimum relative epoch-to-epoch train-loss improvement. "
+            "0.001 means 0.1 percent."
         ),
     )
 
@@ -55,26 +65,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Multiplicative LR reduction factor on plateau.",
-    )
-
-    parser.add_argument(
-        "--stop-patience",
-        type=int,
-        default=15,
-        help=(
-            "Stop after this many consecutive epochs without "
-            "a meaningful train-loss improvement."
-        ),
-    )
-
-    parser.add_argument(
-        "--plateau-min-delta",
-        type=float,
-        default=1e-4,
-        help=(
-            "Minimum absolute train-loss decrease counted as "
-            "an improvement."
-        ),
     )
 
     custom_args, remaining = parser.parse_known_args()
@@ -91,11 +81,11 @@ def parse_args() -> argparse.Namespace:
         sys.argv = original_argv
 
     args.min_epochs = custom_args.min_epochs
-    args.lr_patience = custom_args.lr_patience
+    args.plateau_patience = custom_args.plateau_patience
+    args.relative_threshold = custom_args.relative_threshold
     args.lr_factor = custom_args.lr_factor
-    args.stop_patience = custom_args.stop_patience
-    args.plateau_min_delta = custom_args.plateau_min_delta
     args.plateau_training = True
+    args.plateau_protocol = "relative_epoch_loss_v2"
 
     return args
 
@@ -104,13 +94,13 @@ def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: ReduceLROnPlateau,
     scaler: torch.amp.GradScaler,
     args: argparse.Namespace,
     epoch: int,
     global_step: int,
     best_loss: float,
-    bad_epochs: int,
+    previous_loss: float | None,
+    plateau_epochs: int,
 ) -> None:
     torch.save(
         {
@@ -120,12 +110,13 @@ def save_checkpoint(
             "global_step": global_step,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
+            "scheduler": None,
             "scaler": scaler.state_dict(),
             "args": vars(args),
             "plateau_state": {
                 "best_loss": best_loss,
-                "bad_epochs": bad_epochs,
+                "previous_loss": previous_loss,
+                "plateau_epochs": plateau_epochs,
             },
         },
         path,
@@ -136,79 +127,62 @@ def load_checkpoint(
     path: str,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: ReduceLROnPlateau,
     scaler: torch.amp.GradScaler,
     network_path: str,
-) -> tuple[int, int, float, int]:
+) -> tuple[int, int, float, float | None, int]:
     checkpoint = torch.load(
         path,
         map_location="cpu",
         weights_only=False,
     )
 
-    if (
-        checkpoint["network"]
-        != network_path
-    ):
+    if checkpoint["network"] != network_path:
         raise RuntimeError(
             "Checkpoint network does not match:\n"
             f'checkpoint: {checkpoint["network"]}\n'
             f"command: {network_path}"
         )
 
-    checkpoint_args = checkpoint.get(
-        "args",
-        {},
-    )
+    checkpoint_args = checkpoint.get("args", {})
 
-    if not checkpoint_args.get(
-        "plateau_training",
-        False,
-    ):
+    if checkpoint_args.get("plateau_protocol") != "relative_epoch_loss_v2":
         raise RuntimeError(
-            "This checkpoint was not created by the "
-            "plateau training protocol. Resume from a "
-            "plateau checkpoint instead."
+            "This checkpoint was not created by the current "
+            "relative-loss plateau protocol. Resume from a checkpoint "
+            "produced by train_plateau_v2.py."
         )
 
-    model.load_state_dict(
-        checkpoint["model"],
-        strict=True,
-    )
+    model.load_state_dict(checkpoint["model"], strict=True)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scaler.load_state_dict(checkpoint["scaler"])
 
-    optimizer.load_state_dict(
-        checkpoint["optimizer"]
-    )
-
-    scheduler.load_state_dict(
-        checkpoint["scheduler"]
-    )
-
-    scaler.load_state_dict(
-        checkpoint["scaler"]
-    )
-
-    plateau_state = checkpoint.get(
-        "plateau_state",
-        {},
-    )
+    plateau_state = checkpoint.get("plateau_state", {})
+    previous_loss = plateau_state.get("previous_loss")
+    if previous_loss is not None:
+        previous_loss = float(previous_loss)
 
     return (
         checkpoint["epoch"] + 1,
         checkpoint["global_step"],
-        float(
-            plateau_state.get(
-                "best_loss",
-                float("inf"),
-            )
-        ),
-        int(
-            plateau_state.get(
-                "bad_epochs",
-                0,
-            )
-        ),
+        float(plateau_state.get("best_loss", float("inf"))),
+        previous_loss,
+        int(plateau_state.get("plateau_epochs", 0)),
     )
+
+
+def get_current_lr(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
+
+
+def reduce_learning_rate(
+    optimizer: torch.optim.Optimizer,
+    factor: float,
+    min_lr: float,
+) -> tuple[float, float]:
+    old_lr = get_current_lr(optimizer)
+    for group in optimizer.param_groups:
+        group["lr"] = max(float(group["lr"]) * factor, min_lr)
+    return old_lr, get_current_lr(optimizer)
 
 
 def main() -> None:
@@ -219,14 +193,14 @@ def main() -> None:
             "--min-epochs cannot be larger than --epochs."
         )
 
-    if args.lr_patience < 0:
+    if args.plateau_patience <= 0:
         raise ValueError(
-            "--lr-patience must be >= 0."
+            "--plateau-patience must be > 0."
         )
 
-    if args.stop_patience <= 0:
+    if args.relative_threshold < 0.0:
         raise ValueError(
-            "--stop-patience must be > 0."
+            "--relative-threshold must be >= 0."
         )
 
     if not 0.0 < args.lr_factor < 1.0:
@@ -234,9 +208,9 @@ def main() -> None:
             "--lr-factor must be between 0 and 1."
         )
 
-    if args.plateau_min_delta < 0.0:
+    if args.min_lr <= 0.0:
         raise ValueError(
-            "--plateau-min-delta must be >= 0."
+            "--min-lr must be > 0."
         )
 
     original_train.set_seed(
@@ -327,26 +301,25 @@ def main() -> None:
     )
 
     logger.info(
-        "LR schedule: ReduceLROnPlateau(train loss) | "
+        "LR schedule: relative-loss plateau | "
         "Initial LR: %.8f | "
         "Minimum LR: %.8f | "
-        "Factor: %.3f | "
-        "LR patience: %d",
+        "Factor: %.3f",
         args.lr,
         args.min_lr,
         args.lr_factor,
-        args.lr_patience,
     )
 
     logger.info(
-        "Plateau stop | "
+        "Plateau rule | "
+        "Relative threshold: %.6f (%.4f%%) | "
+        "Patience: %d | "
         "Min epochs: %d | "
-        "Stop patience: %d | "
-        "Min delta: %.8f | "
         "Max epochs: %d",
+        args.relative_threshold,
+        args.relative_threshold * 100.0,
+        args.plateau_patience,
         args.min_epochs,
-        args.stop_patience,
-        args.plateau_min_delta,
         args.epochs,
     )
 
@@ -594,16 +567,6 @@ def main() -> None:
         ),
     )
 
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=args.lr_factor,
-        patience=args.lr_patience,
-        threshold=args.plateau_min_delta,
-        threshold_mode="abs",
-        min_lr=args.min_lr,
-    )
-
     scaler = (
         torch.amp.GradScaler(
             "cuda",
@@ -614,23 +577,22 @@ def main() -> None:
     start_epoch = 1
     global_step = 0
     best_loss = float("inf")
-    bad_epochs = 0
+    previous_loss = None
+    plateau_epochs = 0
 
     if args.resume is not None:
         (
             start_epoch,
             global_step,
             best_loss,
-            bad_epochs,
+            previous_loss,
+            plateau_epochs,
         ) = load_checkpoint(
             path=args.resume,
             model=model,
             optimizer=optimizer,
-            scheduler=scheduler,
             scaler=scaler,
-            network_path=(
-                args.network
-            ),
+            network_path=args.network,
         )
 
         logger.info(
@@ -639,16 +601,20 @@ def main() -> None:
             "Step: %d | "
             "LR: %.8f | "
             "Best loss: %.6f | "
-            "Bad epochs: %d",
+            "Previous loss: %s | "
+            "Plateau: %d/%d",
             args.resume,
             start_epoch,
             global_step,
-            optimizer
-            .param_groups[0][
-                "lr"
-            ],
+            get_current_lr(optimizer),
             best_loss,
-            bad_epochs,
+            (
+                f"{previous_loss:.6f}"
+                if previous_loss is not None
+                else "None"
+            ),
+            plateau_epochs,
+            args.plateau_patience,
         )
 
     metrics_path = (
@@ -711,27 +677,63 @@ def main() -> None:
             train_statistics["loss"]
         )
 
-        improved = (
-            current_loss
-            < (
-                best_loss
-                - args.plateau_min_delta
-            )
+        absolute_best_improved = current_loss < best_loss
+        if absolute_best_improved:
+            best_loss = current_loss
+
+        relative_improvement = None
+        if previous_loss is not None:
+            denominator = max(abs(previous_loss), 1e-12)
+            relative_improvement = (previous_loss - current_loss) / denominator
+
+            if relative_improvement < args.relative_threshold:
+                plateau_epochs += 1
+            else:
+                plateau_epochs = 0
+
+        plateau_before_action = plateau_epochs
+        current_lr = get_current_lr(optimizer)
+        at_min_lr = current_lr <= args.min_lr * (1.0 + 1e-12)
+        plateau_triggered = (
+            previous_loss is not None
+            and plateau_epochs >= args.plateau_patience
         )
 
-        if improved:
-            best_loss = current_loss
-            bad_epochs = 0
-        else:
-            bad_epochs += 1
+        action = "KEEP"
+        should_stop = False
+
+        if plateau_triggered:
+            if not at_min_lr:
+                _, new_lr = reduce_learning_rate(
+                    optimizer=optimizer,
+                    factor=args.lr_factor,
+                    min_lr=args.min_lr,
+                )
+                action = f"LR_DOWN->{new_lr:.8f}"
+                plateau_epochs = 0
+            elif epoch >= args.min_epochs:
+                action = "STOP"
+                should_stop = True
+            else:
+                action = "MIN_LR_HOLD"
+                plateau_epochs = min(
+                    plateau_epochs,
+                    args.plateau_patience,
+                )
+
+        next_lr = get_current_lr(optimizer)
 
         append_metrics(
             path=metrics_path,
             epoch=epoch,
             global_step=global_step,
-            train_statistics=(
-                train_statistics
-            ),
+            train_statistics=train_statistics,
+        )
+
+        relative_text = (
+            "N/A"
+            if relative_improvement is None
+            else f"{relative_improvement * 100.0:+.4f}%"
         )
 
         logger.info(
@@ -741,154 +743,98 @@ def main() -> None:
             "Aux %.6f | "
             "Region %.6f | "
             "Edge %.6f | "
-            "LR %.8f | "
-            "Best %.6f | "
-            "Bad %d/%d | "
+            "DeltaRel %s | "
+            "Plateau %d/%d | "
+            "LR used %.8f | "
+            "Next LR %.8f | "
+            "Action %s | "
             "Train %.1fs",
             epoch,
             current_loss,
-            train_statistics.get(
-                "loss_main",
-                0.0,
-            ),
-            train_statistics.get(
-                "loss_aux",
-                0.0,
-            ),
-            train_statistics.get(
-                "loss_region",
-                0.0,
-            ),
-            train_statistics.get(
-                "loss_edge",
-                0.0,
-            ),
-            train_statistics[
-                "lr"
-            ],
-            best_loss,
-            bad_epochs,
-            args.stop_patience,
-            train_statistics[
-                "time_seconds"
-            ],
+            train_statistics.get("loss_main", 0.0),
+            train_statistics.get("loss_aux", 0.0),
+            train_statistics.get("loss_region", 0.0),
+            train_statistics.get("loss_edge", 0.0),
+            relative_text,
+            plateau_before_action,
+            args.plateau_patience,
+            train_statistics["lr"],
+            next_lr,
+            action,
+            train_statistics["time_seconds"],
         )
 
-        old_lr = optimizer.param_groups[0][
-            "lr"
-        ]
-
-        scheduler.step(
-            current_loss
-        )
-
-        new_lr = optimizer.param_groups[0][
-            "lr"
-        ]
-
-        if new_lr < old_lr:
-            logger.info(
-                "Plateau LR reduction | "
-                "%.8f -> %.8f",
-                old_lr,
-                new_lr,
-            )
+        previous_loss = current_loss
+        final_epoch = epoch
 
         save_checkpoint(
-            path=(
-                checkpoint_dir
-                / "latest.pth"
-            ),
+            path=checkpoint_dir / "latest.pth",
             model=model,
             optimizer=optimizer,
-            scheduler=scheduler,
             scaler=scaler,
             args=args,
             epoch=epoch,
             global_step=global_step,
             best_loss=best_loss,
-            bad_epochs=bad_epochs,
+            previous_loss=previous_loss,
+            plateau_epochs=plateau_epochs,
         )
 
-        if improved:
+        if absolute_best_improved:
             save_checkpoint(
-                path=(
-                    checkpoint_dir
-                    / "best_train_loss.pth"
-                ),
+                path=checkpoint_dir / "best_train_loss.pth",
                 model=model,
                 optimizer=optimizer,
-                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,
                 global_step=global_step,
                 best_loss=best_loss,
-                bad_epochs=bad_epochs,
+                previous_loss=previous_loss,
+                plateau_epochs=plateau_epochs,
             )
 
-        if (
-            epoch
-            % args.save_every
-            == 0
-        ):
+        if epoch % args.save_every == 0:
             save_checkpoint(
-                path=(
-                    checkpoint_dir
-                    / (
-                        f"epoch_"
-                        f"{epoch:04d}.pth"
-                    )
-                ),
+                path=checkpoint_dir / f"epoch_{epoch:04d}.pth",
                 model=model,
                 optimizer=optimizer,
-                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,
                 global_step=global_step,
                 best_loss=best_loss,
-                bad_epochs=bad_epochs,
+                previous_loss=previous_loss,
+                plateau_epochs=plateau_epochs,
             )
-
-        final_epoch = epoch
-
-        should_stop = (
-            epoch >= args.min_epochs
-            and bad_epochs
-            >= args.stop_patience
-        )
 
         if should_stop:
             stopped_early = True
 
             logger.info(
-                "Training plateau reached | "
+                "Minimum-LR plateau reached | "
                 "Epoch: %d | "
-                "Best train loss: %.6f | "
-                "No meaningful improvement "
-                "for %d epochs",
+                "LR: %.8f | "
+                "Loss: %.6f | "
+                "Relative improvement: %s",
                 epoch,
-                best_loss,
-                bad_epochs,
+                next_lr,
+                current_loss,
+                relative_text,
             )
 
             save_checkpoint(
-                path=(
-                    checkpoint_dir
-                    / "final.pth"
-                ),
+                path=checkpoint_dir / "final.pth",
                 model=model,
                 optimizer=optimizer,
-                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,
                 global_step=global_step,
                 best_loss=best_loss,
-                bad_epochs=bad_epochs,
+                previous_loss=previous_loss,
+                plateau_epochs=plateau_epochs,
             )
-
             break
 
         if epoch == args.epochs:
@@ -899,13 +845,13 @@ def main() -> None:
                 ),
                 model=model,
                 optimizer=optimizer,
-                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,
                 global_step=global_step,
                 best_loss=best_loss,
-                bad_epochs=bad_epochs,
+                previous_loss=previous_loss,
+                plateau_epochs=plateau_epochs,
             )
 
     logger.info(
@@ -913,10 +859,12 @@ def main() -> None:
         "Final epoch: %d | "
         "Stopped on plateau: %s | "
         "Best train loss: %.6f | "
+        "Final LR: %.8f | "
         "Final checkpoint: %s",
         final_epoch,
         stopped_early,
         best_loss,
+        get_current_lr(optimizer),
         checkpoint_dir
         / "final.pth",
     )

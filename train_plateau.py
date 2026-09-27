@@ -1,123 +1,278 @@
-from __future__ import annotations
+# train.py
 
 import argparse
+import csv
+import importlib
 import json
 import logging
+import random
 import shutil
-import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
 
-import train as original_train
-
-
-_ORIGINAL_PARSE_ARGS = original_train.parse_args
-
-# Keep these names patchable so train_asymmetric_evidence_plateau_v2.py can
-# replace only the loss / metric functions exactly like the current
-# train_asymmetric_evidence.py does.
-SODLoss = original_train.SODLoss
-prepare_metrics_file = original_train.prepare_metrics_file
-append_metrics = original_train.append_metrics
+from data.dataset import SODDataset
+from engine.model_inputs import (
+    get_model_input_keys,
+    get_model_mean_hierarchies,
+    get_model_nam_hierarchies,
+    model_uses_mean,
+    model_uses_nam,
+)
+from engine.trainer import train_one_epoch
+from losses.sod_loss import SODLoss
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        add_help=False,
+        description="Train an SOD network.",
     )
 
     parser.add_argument(
-        "--min-epochs",
+        "--network",
+        default="models.networks.resnet18_baseline",
+    )
+
+    parser.add_argument(
+        "--train-images",
+        default=(
+            "datasets/DUTS/DUTS-TR/"
+            "DUTS-TR-Image"
+        ),
+    )
+
+    parser.add_argument(
+        "--train-masks",
+        default=(
+            "datasets/DUTS/DUTS-TR/"
+            "DUTS-TR-Mask"
+        ),
+    )
+
+    parser.add_argument(
+        "--train-nam",
+        default=(
+            "datasets/DUTS/DUTS-TR/"
+            "nam"
+        ),
+    )
+
+    parser.add_argument(
+        "--train-mean",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--image-size",
         type=int,
-        default=40,
-        help=(
-            "Training may reduce LR before this point, "
-            "but it will not stop before this epoch."
-        ),
+        default=352,
     )
 
     parser.add_argument(
-        "--plateau-patience",
+        "--batch-size",
         type=int,
-        default=2,
+        default=8,
+    )
+
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=30,
+    )
+
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+    )
+
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-4,
+    )
+
+    parser.add_argument(
+        "--min-lr",
+        type=float,
+        default=1e-6,
+    )
+
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-4,
+    )
+
+    parser.add_argument(
+        "--aux-weight",
+        type=float,
+        default=0.4,
+    )
+
+    parser.add_argument(
+        "--edge-weight",
+        type=float,
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--region-weight",
+        type=float,
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--region-hierarchy",
+        type=int,
+        default=60,
+    )
+
+    parser.add_argument(
+        "--augment-8way",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help=(
-            "Number of consecutive epochs whose relative loss "
-            "improvement is below the threshold before reducing LR. "
-            "At min LR, the same condition stops training."
+            "Expand the training set with eight "
+            "fixed rotation and flip variants."
         ),
     )
 
     parser.add_argument(
-        "--relative-threshold",
-        type=float,
-        default=0.001,
-        help=(
-            "Minimum relative epoch-to-epoch train-loss improvement. "
-            "0.001 means 0.1 percent."
+        "--device",
+        default=(
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
         ),
     )
 
     parser.add_argument(
-        "--lr-factor",
-        type=float,
-        default=0.5,
-        help="Multiplicative LR reduction factor on plateau.",
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
     )
 
-    custom_args, remaining = parser.parse_known_args()
+    parser.add_argument(
+        "--run-dir",
+        default="runs/resnet18_baseline",
+    )
 
-    original_argv = sys.argv
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=5,
+    )
 
-    try:
-        sys.argv = [
-            original_argv[0],
-            *remaining,
-        ]
-        args = _ORIGINAL_PARSE_ARGS()
-    finally:
-        sys.argv = original_argv
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=50,
+    )
 
-    args.min_epochs = custom_args.min_epochs
-    args.plateau_patience = custom_args.plateau_patience
-    args.relative_threshold = custom_args.relative_threshold
-    args.lr_factor = custom_args.lr_factor
-    args.plateau_training = True
-    args.plateau_protocol = "relative_epoch_loss_v2"
+    parser.add_argument(
+        "--resume",
+        default=None,
+    )
 
-    return args
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
+
+    parser.add_argument(
+        "--max-train-samples",
+        type=int,
+        default=None,
+        help=(
+            "Use only the first N training "
+            "samples for debugging."
+        ),
+    )
+
+    return parser.parse_args()
+
+
+def set_seed(
+    seed: int,
+) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def setup_logging(
+    log_path: Path,
+    resume: bool,
+) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(
+                log_path,
+                mode=(
+                    "a"
+                    if resume
+                    else "w"
+                ),
+                encoding="utf-8",
+            ),
+        ],
+        force=True,
+    )
+
+
+def build_model(
+    network_path: str,
+) -> tuple[
+    torch.nn.Module,
+    object,
+]:
+    network_module = (
+        importlib.import_module(
+            network_path
+        )
+    )
+
+    model = (
+        network_module.build_model()
+    )
+
+    return (
+        model,
+        network_module,
+    )
 
 
 def save_checkpoint(
     path: Path,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
     scaler: torch.amp.GradScaler,
     args: argparse.Namespace,
     epoch: int,
     global_step: int,
-    best_loss: float,
-    previous_loss: float | None,
-    plateau_epochs: int,
 ) -> None:
     torch.save(
         {
-            "format_version": 2,
+            "format_version": 1,
             "network": args.network,
             "epoch": epoch,
             "global_step": global_step,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "scheduler": None,
+            "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
             "args": vars(args),
-            "plateau_state": {
-                "best_loss": best_loss,
-                "previous_loss": previous_loss,
-                "plateau_epochs": plateau_epochs,
-            },
         },
         path,
     )
@@ -127,93 +282,139 @@ def load_checkpoint(
     path: str,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
     scaler: torch.amp.GradScaler,
     network_path: str,
-) -> tuple[int, int, float, float | None, int]:
+) -> tuple[int, int]:
     checkpoint = torch.load(
         path,
         map_location="cpu",
         weights_only=False,
     )
 
-    if checkpoint["network"] != network_path:
+    if (
+        checkpoint["network"]
+        != network_path
+    ):
         raise RuntimeError(
             "Checkpoint network does not match:\n"
-            f'checkpoint: {checkpoint["network"]}\n'
+            f'checkpoint: '
+            f'{checkpoint["network"]}\n'
             f"command: {network_path}"
         )
 
-    checkpoint_args = checkpoint.get("args", {})
+    model.load_state_dict(
+        checkpoint["model"],
+        strict=True,
+    )
 
-    if checkpoint_args.get("plateau_protocol") != "relative_epoch_loss_v2":
-        raise RuntimeError(
-            "This checkpoint was not created by the current "
-            "relative-loss plateau protocol. Resume from a checkpoint "
-            "produced by train_plateau_v2.py."
-        )
+    optimizer.load_state_dict(
+        checkpoint["optimizer"]
+    )
 
-    model.load_state_dict(checkpoint["model"], strict=True)
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    scaler.load_state_dict(checkpoint["scaler"])
+    scheduler.load_state_dict(
+        checkpoint["scheduler"]
+    )
 
-    plateau_state = checkpoint.get("plateau_state", {})
-    previous_loss = plateau_state.get("previous_loss")
-    if previous_loss is not None:
-        previous_loss = float(previous_loss)
+    scaler.load_state_dict(
+        checkpoint["scaler"]
+    )
 
     return (
         checkpoint["epoch"] + 1,
         checkpoint["global_step"],
-        float(plateau_state.get("best_loss", float("inf"))),
-        previous_loss,
-        int(plateau_state.get("plateau_epochs", 0)),
     )
 
 
-def get_current_lr(optimizer: torch.optim.Optimizer) -> float:
-    return float(optimizer.param_groups[0]["lr"])
+def prepare_metrics_file(
+    path: Path,
+    resume: bool,
+) -> None:
+    if (
+        resume
+        and path.exists()
+    ):
+        return
+
+    with path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.writer(
+            file
+        )
+
+        writer.writerow(
+            [
+                "epoch",
+                "global_step",
+                "train_loss",
+                "train_loss_main",
+                "train_loss_aux",
+                "train_loss_region",
+                "train_loss_edge",
+                "learning_rate",
+                "train_time_seconds",
+            ]
+        )
 
 
-def reduce_learning_rate(
-    optimizer: torch.optim.Optimizer,
-    factor: float,
-    min_lr: float,
-) -> tuple[float, float]:
-    old_lr = get_current_lr(optimizer)
-    for group in optimizer.param_groups:
-        group["lr"] = max(float(group["lr"]) * factor, min_lr)
-    return old_lr, get_current_lr(optimizer)
+def append_metrics(
+    path: Path,
+    epoch: int,
+    global_step: int,
+    train_statistics: dict[
+        str,
+        float,
+    ],
+) -> None:
+    with path.open(
+        "a",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.writer(
+            file
+        )
+
+        writer.writerow(
+            [
+                epoch,
+                global_step,
+                train_statistics[
+                    "loss"
+                ],
+                train_statistics.get(
+                    "loss_main",
+                    "",
+                ),
+                train_statistics.get(
+                    "loss_aux",
+                    "",
+                ),
+                train_statistics.get(
+                    "loss_region",
+                    "",
+                ),
+                train_statistics.get(
+                    "loss_edge",
+                    "",
+                ),
+                train_statistics[
+                    "lr"
+                ],
+                train_statistics[
+                    "time_seconds"
+                ],
+            ]
+        )
 
 
 def main() -> None:
     args = parse_args()
 
-    if args.min_epochs > args.epochs:
-        raise ValueError(
-            "--min-epochs cannot be larger than --epochs."
-        )
-
-    if args.plateau_patience <= 0:
-        raise ValueError(
-            "--plateau-patience must be > 0."
-        )
-
-    if args.relative_threshold < 0.0:
-        raise ValueError(
-            "--relative-threshold must be >= 0."
-        )
-
-    if not 0.0 < args.lr_factor < 1.0:
-        raise ValueError(
-            "--lr-factor must be between 0 and 1."
-        )
-
-    if args.min_lr <= 0.0:
-        raise ValueError(
-            "--min-lr must be > 0."
-        )
-
-    original_train.set_seed(
+    set_seed(
         args.seed
     )
 
@@ -260,7 +461,7 @@ def main() -> None:
         exist_ok=True,
     )
 
-    original_train.setup_logging(
+    setup_logging(
         log_path=(
             log_dir
             / "train.log"
@@ -301,26 +502,11 @@ def main() -> None:
     )
 
     logger.info(
-        "LR schedule: relative-loss plateau | "
+        "LR schedule: cosine | "
         "Initial LR: %.8f | "
-        "Minimum LR: %.8f | "
-        "Factor: %.3f",
+        "Minimum LR: %.8f",
         args.lr,
         args.min_lr,
-        args.lr_factor,
-    )
-
-    logger.info(
-        "Plateau rule | "
-        "Relative threshold: %.6f (%.4f%%) | "
-        "Patience: %d | "
-        "Min epochs: %d | "
-        "Max epochs: %d",
-        args.relative_threshold,
-        args.relative_threshold * 100.0,
-        args.plateau_patience,
-        args.min_epochs,
-        args.epochs,
     )
 
     logger.info(
@@ -350,27 +536,24 @@ def main() -> None:
     (
         model,
         network_module,
-    ) = original_train.build_model(
+    ) = build_model(
         args.network
     )
 
     model_input_keys = (
-        original_train
-        .get_model_input_keys(
+        get_model_input_keys(
             model
         )
     )
 
     nam_hierarchies = (
-        original_train
-        .get_model_nam_hierarchies(
+        get_model_nam_hierarchies(
             model
         )
     )
 
     model_mean_hierarchies = (
-        original_train
-        .get_model_mean_hierarchies(
+        get_model_mean_hierarchies(
             model
         )
     )
@@ -399,14 +582,14 @@ def main() -> None:
 
     train_nam_dir = (
         args.train_nam
-        if original_train.model_uses_nam(
+        if model_uses_nam(
             model
         )
         else None
     )
 
     mean_required = (
-        original_train.model_uses_mean(
+        model_uses_mean(
             model
         )
         or region_target_key
@@ -484,22 +667,11 @@ def main() -> None:
         / network_source_path.name,
     )
 
-    # Save the exact plateau trainer used by this run as well.
-    trainer_source_path = Path(
-        __file__
-    )
-
-    shutil.copy2(
-        trainer_source_path,
-        source_dir
-        / trainer_source_path.name,
-    )
-
     model = model.to(
         device
     )
 
-    train_dataset = original_train.SODDataset(
+    train_dataset = SODDataset(
         image_dir=args.train_images,
         mask_dir=args.train_masks,
         nam_dir=train_nam_dir,
@@ -567,6 +739,14 @@ def main() -> None:
         ),
     )
 
+    scheduler = (
+        CosineAnnealingLR(
+            optimizer,
+            T_max=args.epochs,
+            eta_min=args.min_lr,
+        )
+    )
+
     scaler = (
         torch.amp.GradScaler(
             "cuda",
@@ -576,45 +756,35 @@ def main() -> None:
 
     start_epoch = 1
     global_step = 0
-    best_loss = float("inf")
-    previous_loss = None
-    plateau_epochs = 0
+    best_main_loss = float("inf")
 
     if args.resume is not None:
         (
             start_epoch,
             global_step,
-            best_loss,
-            previous_loss,
-            plateau_epochs,
         ) = load_checkpoint(
             path=args.resume,
             model=model,
             optimizer=optimizer,
+            scheduler=scheduler,
             scaler=scaler,
-            network_path=args.network,
+            network_path=(
+                args.network
+            ),
         )
 
         logger.info(
             "Resumed from %s | "
             "Next epoch: %d | "
             "Step: %d | "
-            "LR: %.8f | "
-            "Best loss: %.6f | "
-            "Previous loss: %s | "
-            "Plateau: %d/%d",
+            "LR: %.8f",
             args.resume,
             start_epoch,
             global_step,
-            get_current_lr(optimizer),
-            best_loss,
-            (
-                f"{previous_loss:.6f}"
-                if previous_loss is not None
-                else "None"
-            ),
-            plateau_epochs,
-            args.plateau_patience,
+            optimizer
+            .param_groups[0][
+                "lr"
+            ],
         )
 
     metrics_path = (
@@ -630,6 +800,36 @@ def main() -> None:
         ),
     )
 
+    if (
+        args.resume is not None
+        and metrics_path.exists()
+    ):
+        with metrics_path.open(
+            "r",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                value = row.get(
+                    "train_loss_main"
+                )
+                if (
+                    value is not None
+                    and value != ""
+                ):
+                    best_main_loss = min(
+                        best_main_loss,
+                        float(value),
+                    )
+
+        if best_main_loss < float("inf"):
+            logger.info(
+                "Recovered best main loss "
+                "from metrics.csv: %.6f",
+                best_main_loss,
+            )
+
     logger.info(
         "Training samples: %d",
         len(train_dataset),
@@ -641,12 +841,9 @@ def main() -> None:
     )
 
     logger.info(
-        "Maximum epochs: %d",
+        "Total epochs: %d",
         args.epochs,
     )
-
-    final_epoch = start_epoch - 1
-    stopped_early = False
 
     for epoch in range(
         start_epoch,
@@ -655,7 +852,7 @@ def main() -> None:
         (
             train_statistics,
             global_step,
-        ) = original_train.train_one_epoch(
+        ) = train_one_epoch(
             model=model,
             data_loader=train_loader,
             criterion=criterion,
@@ -673,67 +870,13 @@ def main() -> None:
             ),
         )
 
-        current_loss = float(
-            train_statistics["loss"]
-        )
-
-        absolute_best_improved = current_loss < best_loss
-        if absolute_best_improved:
-            best_loss = current_loss
-
-        relative_improvement = None
-        if previous_loss is not None:
-            denominator = max(abs(previous_loss), 1e-12)
-            relative_improvement = (previous_loss - current_loss) / denominator
-
-            if relative_improvement < args.relative_threshold:
-                plateau_epochs += 1
-            else:
-                plateau_epochs = 0
-
-        plateau_before_action = plateau_epochs
-        current_lr = get_current_lr(optimizer)
-        at_min_lr = current_lr <= args.min_lr * (1.0 + 1e-12)
-        plateau_triggered = (
-            previous_loss is not None
-            and plateau_epochs >= args.plateau_patience
-        )
-
-        action = "KEEP"
-        should_stop = False
-
-        if plateau_triggered:
-            if not at_min_lr:
-                _, new_lr = reduce_learning_rate(
-                    optimizer=optimizer,
-                    factor=args.lr_factor,
-                    min_lr=args.min_lr,
-                )
-                action = f"LR_DOWN->{new_lr:.8f}"
-                plateau_epochs = 0
-            elif epoch >= args.min_epochs:
-                action = "STOP"
-                should_stop = True
-            else:
-                action = "MIN_LR_HOLD"
-                plateau_epochs = min(
-                    plateau_epochs,
-                    args.plateau_patience,
-                )
-
-        next_lr = get_current_lr(optimizer)
-
         append_metrics(
             path=metrics_path,
             epoch=epoch,
             global_step=global_step,
-            train_statistics=train_statistics,
-        )
-
-        relative_text = (
-            "N/A"
-            if relative_improvement is None
-            else f"{relative_improvement * 100.0:+.4f}%"
+            train_statistics=(
+                train_statistics
+            ),
         )
 
         logger.info(
@@ -743,99 +886,109 @@ def main() -> None:
             "Aux %.6f | "
             "Region %.6f | "
             "Edge %.6f | "
-            "DeltaRel %s | "
-            "Plateau %d/%d | "
-            "LR used %.8f | "
-            "Next LR %.8f | "
-            "Action %s | "
+            "LR %.8f | "
             "Train %.1fs",
             epoch,
-            current_loss,
-            train_statistics.get("loss_main", 0.0),
-            train_statistics.get("loss_aux", 0.0),
-            train_statistics.get("loss_region", 0.0),
-            train_statistics.get("loss_edge", 0.0),
-            relative_text,
-            plateau_before_action,
-            args.plateau_patience,
-            train_statistics["lr"],
-            next_lr,
-            action,
-            train_statistics["time_seconds"],
+            train_statistics[
+                "loss"
+            ],
+            train_statistics.get(
+                "loss_main",
+                0.0,
+            ),
+            train_statistics.get(
+                "loss_aux",
+                0.0,
+            ),
+            train_statistics.get(
+                "loss_region",
+                0.0,
+            ),
+            train_statistics.get(
+                "loss_edge",
+                0.0,
+            ),
+            train_statistics[
+                "lr"
+            ],
+            train_statistics[
+                "time_seconds"
+            ],
         )
 
-        previous_loss = current_loss
-        final_epoch = epoch
+        scheduler.step()
+
+        current_main_loss = float(
+            train_statistics[
+                "loss_main"
+            ]
+        )
+
+        if current_main_loss < best_main_loss:
+            best_main_loss = (
+                current_main_loss
+            )
+
+            save_checkpoint(
+                path=(
+                    checkpoint_dir
+                    / "best_main.pt"
+                ),
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                args=args,
+                epoch=epoch,
+                global_step=global_step,
+            )
+
+            logger.info(
+                "New best main loss | "
+                "Epoch %03d | "
+                "Main %.6f | "
+                "Checkpoint: %s",
+                epoch,
+                best_main_loss,
+                checkpoint_dir
+                / "best_main.pt",
+            )
 
         save_checkpoint(
-            path=checkpoint_dir / "latest.pth",
+            path=(
+                checkpoint_dir
+                / "latest.pth"
+            ),
             model=model,
             optimizer=optimizer,
+            scheduler=scheduler,
             scaler=scaler,
             args=args,
             epoch=epoch,
             global_step=global_step,
-            best_loss=best_loss,
-            previous_loss=previous_loss,
-            plateau_epochs=plateau_epochs,
         )
 
-        if absolute_best_improved:
+        if (
+            epoch
+            % args.save_every
+            == 0
+        ):
             save_checkpoint(
-                path=checkpoint_dir / "best_train_loss.pth",
+                path=(
+                    checkpoint_dir
+                    / (
+                        f"epoch_"
+                        f"{epoch:04d}.pth"
+                    )
+                ),
                 model=model,
                 optimizer=optimizer,
+                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,
                 global_step=global_step,
-                best_loss=best_loss,
-                previous_loss=previous_loss,
-                plateau_epochs=plateau_epochs,
             )
-
-        if epoch % args.save_every == 0:
-            save_checkpoint(
-                path=checkpoint_dir / f"epoch_{epoch:04d}.pth",
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler,
-                args=args,
-                epoch=epoch,
-                global_step=global_step,
-                best_loss=best_loss,
-                previous_loss=previous_loss,
-                plateau_epochs=plateau_epochs,
-            )
-
-        if should_stop:
-            stopped_early = True
-
-            logger.info(
-                "Minimum-LR plateau reached | "
-                "Epoch: %d | "
-                "LR: %.8f | "
-                "Loss: %.6f | "
-                "Relative improvement: %s",
-                epoch,
-                next_lr,
-                current_loss,
-                relative_text,
-            )
-
-            save_checkpoint(
-                path=checkpoint_dir / "final.pth",
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler,
-                args=args,
-                epoch=epoch,
-                global_step=global_step,
-                best_loss=best_loss,
-                previous_loss=previous_loss,
-                plateau_epochs=plateau_epochs,
-            )
-            break
 
         if epoch == args.epochs:
             save_checkpoint(
@@ -845,26 +998,21 @@ def main() -> None:
                 ),
                 model=model,
                 optimizer=optimizer,
+                scheduler=scheduler,
                 scaler=scaler,
                 args=args,
                 epoch=epoch,
                 global_step=global_step,
-                best_loss=best_loss,
-                previous_loss=previous_loss,
-                plateau_epochs=plateau_epochs,
             )
 
     logger.info(
         "Training completed | "
-        "Final epoch: %d | "
-        "Stopped on plateau: %s | "
-        "Best train loss: %.6f | "
-        "Final LR: %.8f | "
+        "Best main loss: %.6f | "
+        "Best-main checkpoint: %s | "
         "Final checkpoint: %s",
-        final_epoch,
-        stopped_early,
-        best_loss,
-        get_current_lr(optimizer),
+        best_main_loss,
+        checkpoint_dir
+        / "best_main.pt",
         checkpoint_dir
         / "final.pth",
     )

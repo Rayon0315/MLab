@@ -13,6 +13,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
 
 from data.scribble_dataset import ScribbleSODDataset
+from engine.model_inputs import (
+    get_model_input_keys,
+    get_model_mean_hierarchies,
+    model_uses_mean,
+)
 from engine.pafr_trainer import train_pafr_one_epoch
 from losses.pafr_loss import PAFRWeakLoss
 from train import (
@@ -35,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-images", required=True)
     parser.add_argument("--train-scribble-gt", required=True)
     parser.add_argument("--train-scribble-mask", required=True)
+    parser.add_argument("--train-mean", default=None)
     parser.add_argument("--image-size", type=int, default=352)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=50)
@@ -172,11 +178,29 @@ def main() -> None:
     model, network_module = build_model(args.network)
     network_source_path = Path(network_module.__file__)
 
+    model_input_keys = get_model_input_keys(model)
+    mean_hierarchies = get_model_mean_hierarchies(model)
+    train_mean_dir = args.train_mean if model_uses_mean(model) else None
+    if model_uses_mean(model) and train_mean_dir is None:
+        raise ValueError(
+            "--train-mean is required when the model uses region-mean maps."
+        )
+
+    logger.info("Model inputs: %s", ", ".join(model_input_keys))
+    if train_mean_dir is not None:
+        logger.info("Region-mean directory: %s", train_mean_dir)
+        logger.info(
+            "Region-mean hierarchies: %s",
+            ", ".join(str(h) for h in mean_hierarchies),
+        )
+
     source_paths = [
         network_source_path,
+        Path(__file__).parent / "models" / "networks" / "vmamba_small_pafr_sod.py",
         Path(__file__),
         Path(__file__).parent / "data" / "scribble_dataset.py",
         Path(__file__).parent / "engine" / "pafr_trainer.py",
+        Path(__file__).parent / "engine" / "pafr_mean_inputs.py",
         Path(__file__).parent / "losses" / "pafr_loss.py",
         Path(__file__).parent / "losses" / "pafr_gated_crf.py",
         Path(__file__).parent / "losses" / "pafr_ssim.py",
@@ -190,6 +214,8 @@ def main() -> None:
         image_dir=args.train_images,
         scribble_gt_dir=args.train_scribble_gt,
         scribble_mask_dir=args.train_scribble_mask,
+        mean_dir=train_mean_dir,
+        mean_hierarchies=mean_hierarchies,
         image_size=(args.image_size, args.image_size),
         augment_8way=args.augment_8way,
     )

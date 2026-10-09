@@ -10,6 +10,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from engine.model_inputs import prepare_model_inputs
+from engine.pafr_mean_inputs import build_scaled_pafr_model_inputs
 from engine.trainer import (
     MAX_GRAD_NORM,
     build_non_finite_report,
@@ -125,7 +126,11 @@ def train_pafr_one_epoch(
             enabled=(amp_dtype is not None),
         ):
             outputs = model(**model_inputs)
-            scaled_outputs = model(image=scaled_image)
+            scaled_model_inputs = build_scaled_pafr_model_inputs(
+                model_inputs=model_inputs,
+                scaled_image=scaled_image,
+            )
+            scaled_outputs = model(**scaled_model_inputs)
 
             loss_dict = criterion(
                 outputs=outputs,

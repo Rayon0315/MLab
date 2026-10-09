@@ -130,24 +130,42 @@ class PAFRWeakLoss(nn.Module):
         scaled_logits: Tensor,
         native_logits: Tensor,
     ) -> Tensor:
-        scaled_probability = torch.sigmoid(scaled_logits.float())
-        native_probability = torch.sigmoid(native_logits.float())
-        native_probability = F.interpolate(
-            native_probability,
-            size=scaled_probability.shape[-2:],
-            mode="bilinear",
-            align_corners=True,
-        )
+        # SSIM computes local variances as E[x^2] - E[x]^2.
+        # Under BF16 autocast this cancellation can become numerically
+        # unstable and make SSIM exceed 1 by a large margin, turning the
+        # SRC term negative.  PAFR's original training code evaluates this
+        # path in FP32, so explicitly leave autocast for the complete SRC
+        # calculation instead of only casting the input tensors to float.
+        with torch.autocast(
+            device_type=scaled_logits.device.type,
+            enabled=False,
+        ):
+            scaled_probability = torch.sigmoid(
+                scaled_logits.float()
+            )
+            native_probability = torch.sigmoid(
+                native_logits.float()
+            )
+            native_probability = F.interpolate(
+                native_probability,
+                size=scaled_probability.shape[-2:],
+                mode="bilinear",
+                align_corners=True,
+            )
 
-        ssim_term = 1.0 - self.ssim(
-            scaled_probability,
-            native_probability,
-        )
-        l1_term = (scaled_probability - native_probability).abs().mean()
-        return (
-            self.src_alpha * ssim_term
-            + (1.0 - self.src_alpha) * l1_term
-        )
+            ssim_term = 1.0 - self.ssim(
+                scaled_probability,
+                native_probability,
+            )
+            l1_term = (
+                scaled_probability
+                - native_probability
+            ).abs().mean()
+
+            return (
+                self.src_alpha * ssim_term
+                + (1.0 - self.src_alpha) * l1_term
+            )
 
     @staticmethod
     def masked_bce_with_logits(

@@ -1,0 +1,43 @@
+# MLab direct Python dependencies
+# Target runtime: Python 3.12, PyTorch 2.8.0, CUDA 12.8
+#
+# For CUDA 12.8, install PyTorch from the official CUDA index, e.g.:
+#   pip install torch==2.8.0 torchvision==0.23.0 \
+#       --index-url https://download.pytorch.org/whl/cu128
+# Then install the remaining dependencies with:
+#   pip install -r requirements.txt
+#
+# mamba-ssm may need to be installed with --no-build-isolation on a fresh
+# environment after PyTorch is already installed.
+
+# Core deep-learning stack
+torch==2.8.0
+torchvision==0.23.0
+
+# Backbone / model dependencies
+mamba-ssm==2.2.4
+timm>=1.0.0,<2.0.0
+einops>=0.8.0,<1.0.0
+antialiased-cnns==0.3
+
+# Data / image IO
+numpy>=1.26.0,<2.3.5
+Pillow>=10.0.0,<13.0.0
+
+# Evaluation
+pysodmetrics==1.6.2
+tqdm>=4.66.0,<5.0.0
+
+# Repository utilities
+scipy>=1.13.0,<2.0.0
+matplotlib>=3.8.0,<4.0.0
+
+# Build helpers for CUDA extensions such as mamba-ssm
+packaging>=24.0
+ninja>=1.11.0
+
+# Optional: only needed for VMamba FLOPs / parameter analysis helpers.
+# fvcore>=0.1.5.post20221221
+
+# Optional: CFMNet has an in-repo normalization fallback, so mmcv is NOT
+# required for normal MLab training/testing.
